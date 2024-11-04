@@ -108,8 +108,9 @@ func (p *HTTPReverseProxy) Start() error {
 }
 
 func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
-	targetHost := req.Host
-	//targetHost := "www.booking.com"
+	// targetHost := req.Host
+
+	targetHost := "www.trivago.com"
 	originalScheme := req.URL.Scheme
 	if originalScheme == "" {
 		if req.TLS != nil {
@@ -153,5 +154,9 @@ func joinURLPath(a, b *url.URL) (path, rawpath string) {
 	} else {
 		apath = apath + bpath
 	}
-	return apath, apath
+	unescaped, err := url.PathUnescape(apath)
+	if err != nil {
+		return apath, apath
+	}
+	return unescaped, apath
 }
