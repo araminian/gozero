@@ -16,16 +16,28 @@ type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 const (
 	defaultTimeout = 10 * time.Minute
 	defaultPort    = 8443
+	defaultBuffer  = 1000
 )
 
 type httpReverseProxyConfig struct {
-	Timeout    *time.Duration
-	ListenPort *int
+	Timeout       *time.Duration
+	ListenPort    *int
+	RequestBuffer *int
 }
 
 type HTTPReverseProxy struct {
 	Timeout    time.Duration
 	ListenPort int
+
+	RequestBufferSize int
+	RequestsCh        chan Requests
+}
+
+func WithBufferSize(buffer int) HTTPReverseProxyConfig {
+	return func(cfg *httpReverseProxyConfig) error {
+		cfg.RequestBuffer = &buffer
+		return nil
+	}
 }
 
 func WithTimeout(timeout time.Duration) HTTPReverseProxyConfig {
@@ -50,12 +62,10 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 		}
 	}
 	var (
-		timeout    time.Duration
-		listenPort int
+		timeout           time.Duration = defaultTimeout
+		listenPort        int           = defaultPort
+		requestBufferSize int           = defaultBuffer
 	)
-	timeout = defaultTimeout
-	listenPort = defaultPort
-
 	if cfg.Timeout != nil {
 		timeout = *cfg.Timeout
 	}
@@ -64,9 +74,15 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 		listenPort = *cfg.ListenPort
 	}
 
+	if cfg.RequestBuffer != nil {
+		requestBufferSize = *cfg.RequestBuffer
+	}
+
 	return &HTTPReverseProxy{
-		Timeout:    timeout,
-		ListenPort: listenPort,
+		Timeout:           timeout,
+		ListenPort:        listenPort,
+		RequestBufferSize: requestBufferSize,
+		RequestsCh:        make(chan Requests, requestBufferSize),
 	}, nil
 }
 
@@ -141,6 +157,11 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	req.Header.Set("X-Forwarded-Proto", req.URL.Scheme)
 
 	log.Printf("Proxying request to: %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+
+	p.RequestsCh <- Requests{
+		Host: req.URL.Host,
+		Path: req.URL.Path,
+	}
 }
 
 func joinURLPath(a, b *url.URL) (path, rawpath string) {
@@ -162,4 +183,8 @@ func joinURLPath(a, b *url.URL) (path, rawpath string) {
 		return apath, apath
 	}
 	return unescaped, apath
+}
+
+func (p *HTTPReverseProxy) Requests() <-chan Requests {
+	return p.RequestsCh
 }

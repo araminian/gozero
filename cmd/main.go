@@ -1,6 +1,10 @@
 package main
 
-import "github.com/araminian/gozero/internal/proxy"
+import (
+	"log"
+
+	"github.com/araminian/gozero/internal/proxy"
+)
 
 type Server struct {
 	proxy proxy.Proxier
@@ -8,6 +12,10 @@ type Server struct {
 
 func (s *Server) Start() error {
 	return s.proxy.Start()
+}
+
+func (s *Server) Requests() <-chan proxy.Requests {
+	return s.proxy.Requests()
 }
 
 func main() {
@@ -21,7 +29,15 @@ func main() {
 		proxy: httpProxy,
 	}
 
-	if err := server.Start(); err != nil {
-		panic(err)
+	go func() {
+		if err := server.Start(); err != nil {
+			panic(err)
+		}
+	}()
+
+	requests := server.Requests()
+
+	for request := range requests {
+		log.Printf("Requests :=> %+v", request)
 	}
 }
