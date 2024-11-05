@@ -100,6 +100,7 @@ func (p *HTTPReverseProxy) Start() error {
 
 	log.Printf("Starting reverse proxy server on port %d", p.ListenPort)
 	err := server.ListenAndServeTLS("server.crt", "server.key")
+	//err := server.ListenAndServe()
 	if err != nil {
 		return err
 	}
@@ -119,6 +120,8 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 			originalScheme = "http"
 		}
 	}
+
+	//originalScheme = "https"
 
 	targetURL, err := url.Parse(fmt.Sprintf("%s://%s", originalScheme, targetHost))
 	if err != nil {
