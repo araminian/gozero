@@ -1,10 +1,11 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/go-redis/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 type RedisConfig func(*redisConfig) error
@@ -36,9 +37,10 @@ func WithRedisPort(port int) RedisConfig {
 
 type RedisClient struct {
 	Client *redis.Client
+	Ctx    context.Context
 }
 
-func NewRedisClient(configs ...RedisConfig) (*RedisClient, error) {
+func NewRedisClient(ctx context.Context, configs ...RedisConfig) (*RedisClient, error) {
 	cfg := &redisConfig{}
 
 	for _, config := range configs {
@@ -63,11 +65,11 @@ func NewRedisClient(configs ...RedisConfig) (*RedisClient, error) {
 		Addr: fmt.Sprintf("%s:%d", host, port),
 	})
 
-	return &RedisClient{Client: client}, nil
+	return &RedisClient{Client: client, Ctx: ctx}, nil
 }
 
 func (r *RedisClient) Ping() (bool, error) {
-	result, err := r.Client.Ping().Result()
+	result, err := r.Client.Ping(r.Ctx).Result()
 	if err != nil {
 		return false, err
 	}
@@ -82,7 +84,7 @@ func (r *RedisClient) Close() error {
 func (r *RedisClient) ScaleUp(host string, scaleThreshold int, scaleDuration time.Duration) error {
 	setScaleUpKey := fmt.Sprintf("gozero:scale_up:%s", host)
 
-	resultSet := r.Client.Set(setScaleUpKey, scaleThreshold, scaleDuration)
+	resultSet := r.Client.Set(r.Ctx, setScaleUpKey, scaleThreshold, scaleDuration)
 	if resultSet.Err() != nil {
 		return resultSet.Err()
 	}
@@ -93,7 +95,7 @@ func (r *RedisClient) ScaleUp(host string, scaleThreshold int, scaleDuration tim
 func (r *RedisClient) ResetTimer(host string, scaleDuration time.Duration) error {
 	setScaleUpKey := fmt.Sprintf("gozero:scale_up:%s", host)
 
-	return r.Client.Expire(setScaleUpKey, scaleDuration).Err()
+	return r.Client.Expire(r.Ctx, setScaleUpKey, scaleDuration).Err()
 }
 
 func (r *RedisClient) ScaleDown(host string) error {
@@ -101,11 +103,11 @@ func (r *RedisClient) ScaleDown(host string) error {
 }
 
 func (r *RedisClient) GetAllScaleUpKeys() ([]string, error) {
-	return r.Client.Keys(scaleUpKeyPrefix).Result()
+	return r.Client.Keys(r.Ctx, scaleUpKeyPrefix).Result()
 }
 
 func (r *RedisClient) GetAllScaleUpKeysValues() (map[string]string, error) {
-	keys, err := r.Client.Keys(scaleUpKeyPrefix + ":*").Result()
+	keys, err := r.Client.Keys(r.Ctx, scaleUpKeyPrefix+":*").Result()
 	if err != nil {
 		return nil, err
 	}
@@ -117,10 +119,10 @@ func (r *RedisClient) GetAllScaleUpKeysValues() (map[string]string, error) {
 	pipe := r.Client.Pipeline()
 	getCommands := make([]*redis.StringCmd, len(keys))
 	for i, key := range keys {
-		getCommands[i] = pipe.Get(key)
+		getCommands[i] = pipe.Get(r.Ctx, key)
 	}
 
-	_, err = pipe.Exec()
+	_, err = pipe.Exec(r.Ctx)
 	if err != nil {
 		return nil, err
 	}
