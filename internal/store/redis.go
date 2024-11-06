@@ -82,7 +82,7 @@ func (r *RedisClient) Close() error {
 }
 
 func (r *RedisClient) ScaleUp(host string, scaleThreshold int, scaleDuration time.Duration) error {
-	setScaleUpKey := fmt.Sprintf("gozero:scale_up:%s", host)
+	setScaleUpKey := fmt.Sprintf("%s:%s", scaleUpKeyPrefix, host)
 
 	resultSet := r.Client.Set(r.Ctx, setScaleUpKey, scaleThreshold, scaleDuration)
 	if resultSet.Err() != nil {
@@ -93,7 +93,7 @@ func (r *RedisClient) ScaleUp(host string, scaleThreshold int, scaleDuration tim
 }
 
 func (r *RedisClient) ResetTimer(host string, scaleDuration time.Duration) error {
-	setScaleUpKey := fmt.Sprintf("gozero:scale_up:%s", host)
+	setScaleUpKey := fmt.Sprintf("%s:%s", scaleUpKeyPrefix, host)
 
 	return r.Client.Expire(r.Ctx, setScaleUpKey, scaleDuration).Err()
 }
@@ -103,7 +103,7 @@ func (r *RedisClient) ScaleDown(host string) error {
 }
 
 func (r *RedisClient) GetAllScaleUpKeys() ([]string, error) {
-	return r.Client.Keys(r.Ctx, scaleUpKeyPrefix).Result()
+	return r.Client.Keys(r.Ctx, scaleUpKeyPrefix+":*").Result()
 }
 
 func (r *RedisClient) GetAllScaleUpKeysValues() (map[string]string, error) {
