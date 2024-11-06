@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/araminian/gozero/internal/config"
 	"github.com/araminian/gozero/internal/lock"
 	"github.com/araminian/gozero/internal/metric"
 	"github.com/araminian/gozero/internal/proxy"
@@ -26,21 +27,40 @@ func (s *Server) Requests() <-chan proxy.Requests {
 	return s.proxy.Requests()
 }
 
+const (
+	defaultProxyPort  = 8443
+	defaultMetricPort = 9090
+	defaultMetricPath = "/metrics"
+	defaultTimeout    = 1 * time.Minute
+	defaultBuffer     = 1000
+	defaultRedisPort  = 6379
+	defaultRedisAddr  = "localhost"
+)
+
 func main() {
+
+	proxyPort := config.GetEnvOrDefaultInt("PROXY_PORT", defaultProxyPort)
+	metricPort := config.GetEnvOrDefaultInt("METRIC_PORT", defaultMetricPort)
+	metricPath := config.GetEnvOrDefaultString("METRIC_PATH", defaultMetricPath)
+	requestTimeout := config.GetEnvOrDefaultDuration("REQUEST_TIMEOUT", defaultTimeout)
+	buffer := config.GetEnvOrDefaultInt("REQUEST_BUFFER", defaultBuffer)
+	redisAddr := config.GetEnvOrDefaultString("REDIS_ADDR", defaultRedisAddr)
+	redisPort := config.GetEnvOrDefaultInt("REDIS_PORT", defaultRedisPort)
+
 	ctx := context.Background()
-	httpProxy, err := proxy.NewHTTPReverseProxy()
+	httpProxy, err := proxy.NewHTTPReverseProxy(proxy.WithListenPort(proxyPort), proxy.WithTimeout(requestTimeout), proxy.WithBufferSize(buffer))
 	if err != nil {
 		panic(err)
 	}
 
-	redisClient, err := store.NewRedisClient(ctx)
+	redisClient, err := store.NewRedisClient(ctx, store.WithRedisHost(redisAddr), store.WithRedisPort(redisPort))
 	if err != nil {
 		panic(err)
 	}
 
 	redisMutex := lock.NewRedisMutex(ctx, redisClient)
 
-	metricServer, err := metric.NewFiberMetricExposer()
+	metricServer, err := metric.NewFiberMetricExposer(metric.WithFiberMetricExposerPath(metricPath), metric.WithFiberMetricExposerPort(metricPort))
 	if err != nil {
 		panic(err)
 	}
