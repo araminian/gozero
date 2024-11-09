@@ -9,14 +9,17 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/araminian/gozero/internal/config"
 )
 
 type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 
 const (
-	defaultTimeout = 10 * time.Minute
-	defaultPort    = 8443
-	defaultBuffer  = 1000
+	defaultTimeout   = 10 * time.Minute
+	defaultPort      = 8443
+	defaultBuffer    = 1000
+	targetHostHeader = "X-Gozero-Target-Host"
 )
 
 type httpReverseProxyConfig struct {
@@ -115,8 +118,8 @@ func (p *HTTPReverseProxy) Start() error {
 	}
 
 	log.Printf("Starting reverse proxy server on port %d", p.ListenPort)
-	err := server.ListenAndServeTLS("server.crt", "server.key")
-	//err := server.ListenAndServe()
+	//err := server.ListenAndServeTLS("server.crt", "server.key")
+	err := server.ListenAndServe()
 	if err != nil {
 		return err
 	}
@@ -125,9 +128,20 @@ func (p *HTTPReverseProxy) Start() error {
 }
 
 func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
-	// targetHost := req.Host
 
-	targetHost := "www.trivago.com"
+	var targetHost string
+
+	isDev := config.GetEnvOrDefaultString("IS_DEV", "false") == "true"
+	if isDev {
+		targetHost = "www.trivago.com"
+	} else {
+		targetHost = req.Header.Get(targetHostHeader)
+		log.Printf("Target host: %s", targetHost)
+		if targetHost == "" {
+			log.Printf("Target host is not set")
+		}
+	}
+
 	originalScheme := req.URL.Scheme
 	if originalScheme == "" {
 		if req.TLS != nil {
@@ -137,7 +151,7 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		}
 	}
 
-	//originalScheme = "https"
+	originalScheme = "https"
 
 	targetURL, err := url.Parse(fmt.Sprintf("%s://%s", originalScheme, targetHost))
 	if err != nil {
