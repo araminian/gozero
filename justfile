@@ -1,6 +1,9 @@
 set export
 set positional-arguments
 
+build VERSION:
+  skaffold build
+
 start-redis:
   docker run --name gozero-redis -d -p 6379:6379 redis
 

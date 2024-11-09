@@ -1,0 +1,16 @@
+apiVersion: skaffold/v3
+kind: Config
+build:
+  artifacts:
+    - image: rminz/gozero
+      docker:
+        dockerfile: Dockerfile
+      context: .
+      platforms:
+        - linux/arm64
+        - linux/amd64
+  tagPolicy:
+    envTemplate:
+      template: "{{.VERSION}}"
+  local:
+    push: true
