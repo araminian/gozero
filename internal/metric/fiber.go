@@ -70,15 +70,35 @@ func (m *FiberMetricExposer) Start(ctx context.Context, store store.Storer) erro
 	m.store = store
 	app := fiber.New()
 
+	// Add route for base metrics path
 	app.Get(m.path, m.exposeMetrics)
+
+	// Keep existing route for service-specific metrics
+	metricFullPath := fmt.Sprintf("%s%s", m.path, "/:svc")
+	app.Get(metricFullPath, m.exposeMetrics)
 
 	return app.Listen(fmt.Sprintf(":%d", m.port))
 }
 
 func (m *FiberMetricExposer) exposeMetrics(c *fiber.Ctx) error {
+	svc := c.Params("svc")
+
 	keys, err := m.store.GetAllScaleUpKeysValues()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(keys)
+
+	if svc == "" {
+		return c.JSON(keys)
+	}
+
+	if _, ok := keys[svc]; !ok {
+		keys[svc] = "0"
+	}
+
+	svcValue := fiber.Map{
+		"value": keys[svc],
+	}
+
+	return c.JSON(svcValue)
 }

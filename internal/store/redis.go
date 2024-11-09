@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -133,7 +134,10 @@ func (r *RedisClient) GetAllScaleUpKeysValues() (map[string]string, error) {
 		if err != nil {
 			continue
 		}
-		result[key] = val
+		// Key format: gozero:scale_up:app.app-a.svc.cluster.local:3000
+		parts := strings.Split(key, ":")
+		parts[2] = strings.ReplaceAll(parts[2], ".", "-")
+		result[parts[2]] = val
 	}
 
 	return result, nil

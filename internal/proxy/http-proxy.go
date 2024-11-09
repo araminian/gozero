@@ -16,10 +16,14 @@ import (
 type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 
 const (
-	defaultTimeout   = 10 * time.Minute
-	defaultPort      = 8443
-	defaultBuffer    = 1000
-	targetHostHeader = "X-Gozero-Target-Host"
+	defaultTimeout      = 10 * time.Minute
+	defaultPort         = 8443
+	defaultBuffer       = 1000
+	targetHostHeader    = "X-Gozero-Target-Host"
+	targetPortHeader    = "X-Gozero-Target-Port"
+	targetSchemeHeader  = "X-Gozero-Target-Scheme"
+	defaultTargetPort   = 443
+	defaultTargetScheme = "https"
 )
 
 type httpReverseProxyConfig struct {
@@ -142,18 +146,17 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		}
 	}
 
-	originalScheme := req.URL.Scheme
+	originalScheme := req.Header.Get(targetSchemeHeader)
 	if originalScheme == "" {
-		if req.TLS != nil {
-			originalScheme = "https"
-		} else {
-			originalScheme = "http"
-		}
+		originalScheme = defaultTargetScheme
 	}
 
-	originalScheme = "https"
+	targetPort := req.Header.Get(targetPortHeader)
+	if targetPort == "" {
+		targetPort = fmt.Sprintf("%d", defaultTargetPort)
+	}
 
-	targetURL, err := url.Parse(fmt.Sprintf("%s://%s", originalScheme, targetHost))
+	targetURL, err := url.Parse(fmt.Sprintf("%s://%s:%s", originalScheme, targetHost, targetPort))
 	if err != nil {
 		log.Printf("Error parsing target URL: %v", err)
 		return
