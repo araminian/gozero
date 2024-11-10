@@ -15,6 +15,7 @@ spec:
           X-Gozero-Target-Port: "3000"
           X-Gozero-Target-Host: "app.app-a.svc.cluster.local"
           X-Gozero-Target-Scheme: "http"
+          X-Gozero-Target-Health-Path: "/pass"
     route:
     # - destination:
     #     host: app.app-a.svc.cluster.local
