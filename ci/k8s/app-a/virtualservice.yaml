@@ -1,0 +1,26 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app
+  namespace: app-a
+spec:
+  hosts:
+  - app-app-a.k8s.orb.local
+  gateways:
+  - istio-system/ingress
+  http:
+  - headers:
+      request:
+        add:
+          X-Gozero-Target-Port: "3000"
+          X-Gozero-Target-Host: "app.app-a.svc.cluster.local"
+          X-Gozero-Target-Scheme: "http"
+    route:
+    # - destination:
+    #     host: app.app-a.svc.cluster.local
+    #     port:
+    #       number: 3000
+    - destination:
+        host: gozero.gozero.svc.cluster.local
+        port:
+          number: 8443
