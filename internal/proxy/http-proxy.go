@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,19 +18,20 @@ import (
 type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 
 const (
-	defaultTimeout          = 10 * time.Minute
-	defaultPort             = 8443
-	defaultBuffer           = 1000
-	targetHostHeader        = "X-Gozero-Target-Host"
-	targetPortHeader        = "X-Gozero-Target-Port"
-	targetSchemeHeader      = "X-Gozero-Target-Scheme"
-	targetHealthPathHeader  = "X-Gozero-Target-Health-Path"
-	defaultTargetHealthPath = "/"
-	defaultTargetPort       = 443
-	defaultTargetScheme     = "https"
-	defaultMaxRetries       = 5
-	defaultInitialBackoff   = 100 * time.Millisecond
-	defaultMaxBackoff       = 2 * time.Second
+	defaultTimeout            = 10 * time.Minute
+	defaultPort               = 8443
+	defaultBuffer             = 1000
+	targetHostHeader          = "X-Gozero-Target-Host"
+	targetPortHeader          = "X-Gozero-Target-Port"
+	targetSchemeHeader        = "X-Gozero-Target-Scheme"
+	targetHealthPathHeader    = "X-Gozero-Target-Health-Path"
+	targetHealthRetriesHeader = "X-Gozero-Target-Health-Retries"
+	defaultTargetHealthPath   = "/"
+	defaultTargetPort         = 443
+	defaultTargetScheme       = "https"
+	defaultMaxRetries         = 20
+	defaultInitialBackoff     = 100 * time.Millisecond
+	defaultMaxBackoff         = 2 * time.Second
 )
 
 type httpReverseProxyConfig struct {
@@ -185,8 +187,12 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	if healthPath == "" {
 		healthPath = defaultTargetHealthPath
 	}
+	retries, err := strconv.Atoi(req.Header.Get(targetHealthRetriesHeader))
+	if err != nil {
+		retries = defaultMaxRetries
+	}
 
-	if err := p.checkServiceAvailability(targetURL.Host, healthPath, originalScheme); err != nil {
+	if err := p.checkServiceAvailability(targetURL.Host, healthPath, originalScheme, retries); err != nil {
 		log.Printf("Service unavailability detected: %v", err)
 		req.URL.Scheme = "error"
 		return
@@ -232,7 +238,7 @@ func (p *HTTPReverseProxy) Requests() <-chan Requests {
 	return p.RequestsCh
 }
 
-func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string) error {
+func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string, retries int) error {
 	hostname, port, err := net.SplitHostPort(host)
 	if err != nil {
 		hostname = host
@@ -249,9 +255,10 @@ func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, sc
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < defaultMaxRetries; attempt++ {
+	for attempt := 0; attempt < retries; attempt++ {
 		healthURL := fmt.Sprintf("%s://%s:%s%s", scheme, hostname, port, path)
 		resp, err := client.Get(healthURL)
+
 		if err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -268,5 +275,5 @@ func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, sc
 		}
 		time.Sleep(backoff)
 	}
-	return fmt.Errorf("service unavailable after %d attempts: %v", defaultMaxRetries, lastErr)
+	return fmt.Errorf("service unavailable after %d attempts: %v", retries, lastErr)
 }
