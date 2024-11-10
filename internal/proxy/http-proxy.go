@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,14 +17,19 @@ import (
 type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 
 const (
-	defaultTimeout      = 10 * time.Minute
-	defaultPort         = 8443
-	defaultBuffer       = 1000
-	targetHostHeader    = "X-Gozero-Target-Host"
-	targetPortHeader    = "X-Gozero-Target-Port"
-	targetSchemeHeader  = "X-Gozero-Target-Scheme"
-	defaultTargetPort   = 443
-	defaultTargetScheme = "https"
+	defaultTimeout          = 10 * time.Minute
+	defaultPort             = 8443
+	defaultBuffer           = 1000
+	targetHostHeader        = "X-Gozero-Target-Host"
+	targetPortHeader        = "X-Gozero-Target-Port"
+	targetSchemeHeader      = "X-Gozero-Target-Scheme"
+	targetHealthPathHeader  = "X-Gozero-Target-Health-Path"
+	defaultTargetHealthPath = "/"
+	defaultTargetPort       = 443
+	defaultTargetScheme     = "https"
+	defaultMaxRetries       = 5
+	defaultInitialBackoff   = 100 * time.Millisecond
+	defaultMaxBackoff       = 2 * time.Second
 )
 
 type httpReverseProxyConfig struct {
@@ -96,6 +102,13 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 func (p *HTTPReverseProxy) Start() error {
 	proxy := &httputil.ReverseProxy{
 		Director: p.httpDirector,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if r.URL.Scheme == "error" {
+				http.Error(w, "Service unavailable or starting up", http.StatusServiceUnavailable)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		},
 	}
 
 	proxy.Transport = &http.Transport{
@@ -162,6 +175,23 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		return
 	}
 
+	path, _ := joinURLPath(targetURL, req.URL)
+	p.RequestsCh <- Requests{
+		Host: targetURL.Host,
+		Path: path,
+	}
+
+	healthPath := req.Header.Get(targetHealthPathHeader)
+	if healthPath == "" {
+		healthPath = defaultTargetHealthPath
+	}
+
+	if err := p.checkServiceAvailability(targetURL.Host, healthPath, originalScheme); err != nil {
+		log.Printf("Service unavailability detected: %v", err)
+		req.URL.Scheme = "error"
+		return
+	}
+
 	req.URL.Scheme = targetURL.Scheme
 	req.URL.Host = targetURL.Host
 	req.URL.Path, req.URL.RawPath = joinURLPath(targetURL, req.URL)
@@ -175,10 +205,6 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 
 	log.Printf("Proxying request to: %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
 
-	p.RequestsCh <- Requests{
-		Host: req.URL.Host,
-		Path: req.URL.Path,
-	}
 }
 
 func joinURLPath(a, b *url.URL) (path, rawpath string) {
@@ -204,4 +230,43 @@ func joinURLPath(a, b *url.URL) (path, rawpath string) {
 
 func (p *HTTPReverseProxy) Requests() <-chan Requests {
 	return p.RequestsCh
+}
+
+func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string) error {
+	hostname, port, err := net.SplitHostPort(host)
+	if err != nil {
+		hostname = host
+		port = fmt.Sprintf("%d", defaultTargetPort)
+	}
+
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		},
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < defaultMaxRetries; attempt++ {
+		healthURL := fmt.Sprintf("%s://%s:%s%s", scheme, hostname, port, path)
+		resp, err := client.Get(healthURL)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return nil
+			}
+			lastErr = fmt.Errorf("health check failed with status code: %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+
+		backoff := defaultInitialBackoff * time.Duration(1<<attempt)
+		if backoff > defaultMaxBackoff {
+			backoff = defaultMaxBackoff
+		}
+		time.Sleep(backoff)
+	}
+	return fmt.Errorf("service unavailable after %d attempts: %v", defaultMaxRetries, lastErr)
 }

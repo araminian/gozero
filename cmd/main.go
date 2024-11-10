@@ -97,7 +97,7 @@ func main() {
 			continue
 		}
 
-		err = server.store.ScaleUp(request.Host, 10, time.Minute*10)
+		err = server.store.ScaleUp(request.Host, 10, time.Minute*5)
 		if err != nil {
 			log.Printf("Error scaling up host: %v", err)
 			continue
