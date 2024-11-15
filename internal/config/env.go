@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func GetEnvOrDefaultString(key, defaultValue string) string {
@@ -36,4 +38,13 @@ func GetEnvOrDefaultDuration(key string, defaultValue time.Duration) time.Durati
 		return defaultValue
 	}
 	return time.Duration(intValue) * time.Second
+}
+
+func GetEnvOrDefaultLogLevel(key, defaultValue string) logrus.Level {
+	value := GetEnvOrDefaultString(key, defaultValue)
+	level, err := logrus.ParseLevel(value)
+	if err != nil {
+		return logrus.InfoLevel
+	}
+	return level
 }
