@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -46,6 +48,7 @@ type httpReverseProxyConfig struct {
 type HTTPReverseProxy struct {
 	timeout    time.Duration
 	listenPort int
+	httpServer *http.Server
 
 	requestBufferSize int
 	requestsCh        chan Requests
@@ -107,7 +110,12 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 	}, nil
 }
 
-func (p *HTTPReverseProxy) Start() error {
+func (p *HTTPReverseProxy) Shutdown(ctx context.Context) error {
+	close(p.requestsCh)
+	return p.httpServer.Shutdown(ctx)
+}
+
+func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	proxy := &httputil.ReverseProxy{
 		Director: p.httpDirector,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -142,11 +150,26 @@ func (p *HTTPReverseProxy) Start() error {
 		IdleTimeout:  p.timeout,
 	}
 
-	config.Log.Infof("Starting reverse proxy server on port %d", p.listenPort)
-	//err := server.ListenAndServeTLS("server.crt", "server.key")
-	err := server.ListenAndServe()
-	if err != nil {
-		return err
+	p.httpServer = server
+
+	go func() {
+		config.Log.Infof("Starting reverse proxy server on port %d", p.listenPort)
+		//err := server.ListenAndServeTLS("server.crt", "server.key")
+		err := server.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			config.Log.Errorf("Error starting reverse proxy server: %+v", err)
+			return
+		}
+	}()
+
+	<-ctx.Done()
+
+	config.Log.Debugf("Reverse proxy server on port %d shutting down...", p.listenPort)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		config.Log.Errorf("Failed to shutdown reverse proxy server: %+v", err)
 	}
 
 	return nil

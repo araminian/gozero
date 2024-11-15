@@ -8,4 +8,5 @@ import (
 
 type MetricServer interface {
 	Start(ctx context.Context, store store.Storer) error
+	Shutdown(ctx context.Context) error
 }

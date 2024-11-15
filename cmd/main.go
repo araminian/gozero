@@ -2,6 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/araminian/gozero/internal/config"
@@ -17,14 +22,7 @@ type Server struct {
 	lock   lock.Locker
 	store  store.Storer
 	metric metric.MetricServer
-}
-
-func (s *Server) Start() error {
-	return s.proxy.Start()
-}
-
-func (s *Server) Requests() <-chan proxy.Requests {
-	return s.proxy.Requests()
+	done   chan struct{}
 }
 
 const (
@@ -58,7 +56,9 @@ func main() {
 	}
 	config.Log.SetLevel(level)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	httpProxy, err := proxy.NewHTTPReverseProxy(proxy.WithListenPort(proxyPort), proxy.WithTimeout(requestTimeout), proxy.WithBufferSize(buffer))
 	if err != nil {
 		panic("failed to create http proxy: " + err.Error())
@@ -80,49 +80,111 @@ func main() {
 		lock:   redisMutex,
 		store:  redisClient,
 		metric: metricServer,
+		done:   make(chan struct{}),
 	}
 
+	// Channel to catch shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start servers in goroutines
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Start metric server
 	go func() {
-		if err := server.metric.Start(ctx, redisClient); err != nil {
-			panic("failed to start metric server: " + err.Error())
+		defer func() {
+			wg.Done()
+			config.Log.Info("Metric server shutdown complete")
+		}()
+		if err := server.metric.Start(ctx, redisClient); err != nil && !errors.Is(err, context.Canceled) {
+			config.Log.Errorf("metric server error: %+v", err)
 		}
 	}()
 
+	// Start proxy server
 	go func() {
-		if err := server.Start(); err != nil {
-			panic("failed to start proxy server: " + err.Error())
+		defer func() {
+			wg.Done()
+			config.Log.Info("Proxy server shutdown complete")
+		}()
+		if err := server.proxy.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			config.Log.Errorf("proxy server error: %+v", err)
 		}
 	}()
 
-	requests := server.Requests()
+	go server.processRequests(ctx)
 
-	hostMutex := server.lock.NewMutex("host")
+	<-sigChan
+	config.Log.Info("Shutting down servers...")
 
-	for request := range requests {
-		config.Log.Debugf("Requests :=> %+v", request)
+	cancel()
+	close(server.done)
 
-		err := hostMutex.TryLock()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
 
-		if err != nil {
-			config.Log.Errorf("Error locking mutex for host '%s': %+v", request.Host, err)
-			continue
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-shutdownCtx.Done():
+		config.Log.Warn("Shutdown timed out")
+	case <-done:
+		config.Log.Info("All servers shut down successfully")
+	}
+
+	if err := server.store.Close(); err != nil {
+		config.Log.Errorf("Error closing store: %+v", err)
+	}
+
+	config.Log.Info("Shutdown complete")
+}
+
+func (s *Server) processRequests(ctx context.Context) {
+	requests := s.proxy.Requests()
+	hostMutex := s.lock.NewMutex("host")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.done:
+			return
+		case request, ok := <-requests:
+			if !ok {
+				// Channel was closed
+				return
+			}
+
+			config.Log.Debugf("Requests :=> %+v", request)
+
+			err := hostMutex.TryLock()
+			if err != nil {
+				config.Log.Errorf("Error locking mutex for host '%s': %+v", request.Host, err)
+				continue
+			}
+
+			config.Log.Debugf("Scaling up host '%s' by %d for %s", request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
+			err = s.store.ScaleUp(request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
+			if err != nil {
+				config.Log.Errorf("Error scaling up host '%s': %+v", request.Host, err)
+				hostMutex.Unlock()
+				continue
+			}
+
+			keyValues, err := s.store.GetAllScaleUpKeys()
+			if err != nil {
+				config.Log.Errorf("Error getting all scale up keys: %+v", err)
+				hostMutex.Unlock()
+				continue
+			}
+
+			config.Log.Debugf("Scale up keys: %+v", keyValues)
+			hostMutex.Unlock()
 		}
-
-		config.Log.Debugf("Scaling up host '%s' by %d for %s", request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
-		err = server.store.ScaleUp(request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
-		if err != nil {
-			config.Log.Errorf("Error scaling up host '%s': %+v", request.Host, err)
-			continue
-		}
-
-		keyValues, err := server.store.GetAllScaleUpKeys()
-		if err != nil {
-			config.Log.Errorf("Error getting all scale up keys: %+v", err)
-			continue
-		}
-
-		config.Log.Debugf("Scale up keys: %+v", keyValues)
-
-		hostMutex.Unlock()
 	}
 }

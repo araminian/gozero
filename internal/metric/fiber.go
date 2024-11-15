@@ -38,6 +38,7 @@ type FiberMetricExposer struct {
 	port  int
 	path  string
 	store store.Storer
+	app   *fiber.App
 }
 
 func NewFiberMetricExposer(configs ...FiberMetricExposerConfig) (*FiberMetricExposer, error) {
@@ -68,16 +69,28 @@ func NewFiberMetricExposer(configs ...FiberMetricExposerConfig) (*FiberMetricExp
 
 func (m *FiberMetricExposer) Start(ctx context.Context, store store.Storer) error {
 	m.store = store
-	app := fiber.New()
+	m.app = fiber.New()
 
 	// Add route for base metrics path
-	app.Get(m.path, m.exposeMetrics)
+	m.app.Get(m.path, m.exposeMetrics)
 
 	// Keep existing route for service-specific metrics
 	metricFullPath := fmt.Sprintf("%s%s", m.path, "/:svc")
-	app.Get(metricFullPath, m.exposeMetrics)
+	m.app.Get(metricFullPath, m.exposeMetrics)
 
-	return app.Listen(fmt.Sprintf(":%d", m.port))
+	go func() {
+		<-ctx.Done()
+		_ = m.app.Shutdown()
+	}()
+
+	return m.app.Listen(fmt.Sprintf(":%d", m.port))
+}
+
+func (m *FiberMetricExposer) Shutdown(ctx context.Context) error {
+	if m.app != nil {
+		return m.app.ShutdownWithContext(ctx)
+	}
+	return nil
 }
 
 func (m *FiberMetricExposer) exposeMetrics(c *fiber.Ctx) error {
