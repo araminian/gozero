@@ -83,11 +83,9 @@ func main() {
 		done:   make(chan struct{}),
 	}
 
-	// Channel to catch shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start servers in goroutines
 	var wg sync.WaitGroup
 	wg.Add(2)
 
