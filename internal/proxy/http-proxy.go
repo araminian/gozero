@@ -21,22 +21,25 @@ import (
 type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
 
 const (
-	defaultTimeout            = 10 * time.Minute
-	defaultPort               = 8443
-	defaultBuffer             = 1000
-	defaultCacheDuration      = 3 * time.Minute
-	defaultCacheCleanup       = 10 * time.Minute
-	targetHostHeader          = "X-Gozero-Target-Host"
-	targetPortHeader          = "X-Gozero-Target-Port"
-	targetSchemeHeader        = "X-Gozero-Target-Scheme"
-	targetHealthPathHeader    = "X-Gozero-Target-Health-Path"
-	targetHealthRetriesHeader = "X-Gozero-Target-Health-Retries"
-	defaultTargetHealthPath   = "/"
-	defaultTargetPort         = 443
-	defaultTargetScheme       = "https"
-	defaultMaxRetries         = 20
-	defaultInitialBackoff     = 100 * time.Millisecond
-	defaultMaxBackoff         = 2 * time.Second
+	defaultTimeout               = 10 * time.Minute
+	defaultPort                  = 8443
+	defaultBuffer                = 1000
+	defaultCacheDuration         = 3 * time.Minute
+	defaultCacheCleanup          = 10 * time.Minute
+	targetHostHeader             = "X-Gozero-Target-Host"
+	targetPortHeader             = "X-Gozero-Target-Port"
+	targetSchemeHeader           = "X-Gozero-Target-Scheme"
+	targetHealthPathHeader       = "X-Gozero-Target-Health-Path"
+	targetHealthRetriesHeader    = "X-Gozero-Target-Health-Retries"
+	defaultTargetHealthPath      = "/"
+	defaultTargetPort            = 443
+	defaultTargetScheme          = "https"
+	defaultMaxRetries            = 20
+	defaultInitialBackoff        = 100 * time.Millisecond
+	defaultMaxBackoff            = 2 * time.Second
+	defaultIdleTimeout           = 120 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultResponseHeaderTimeout = 30 * time.Second
 )
 
 type httpReverseProxyConfig struct {
@@ -127,13 +130,14 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 		},
 	}
 
+	// TODO: Think about Connection Pooling ->  MaxIdleConns , MaxIdleConnsPerHost
 	proxy.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
-		IdleConnTimeout:       p.timeout,
-		ResponseHeaderTimeout: p.timeout,
-		TLSHandshakeTimeout:   p.timeout,
+		IdleConnTimeout:       defaultIdleTimeout,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+		ResponseHeaderTimeout: defaultResponseHeaderTimeout,
 	}
 
 	tlsConfig := &tls.Config{
@@ -142,12 +146,9 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	}
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", p.listenPort),
-		TLSConfig:    tlsConfig,
-		Handler:      proxy,
-		ReadTimeout:  p.timeout,
-		WriteTimeout: p.timeout,
-		IdleTimeout:  p.timeout,
+		Addr:      fmt.Sprintf(":%d", p.listenPort),
+		TLSConfig: tlsConfig,
+		Handler:   proxy,
 	}
 
 	p.httpServer = server
