@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/patrickmn/go-cache"
+	"github.com/sirupsen/logrus"
 
 	"github.com/araminian/gozero/internal/config"
 )
@@ -30,6 +31,7 @@ const (
 	targetPortHeader             = "X-Gozero-Target-Port"
 	targetSchemeHeader           = "X-Gozero-Target-Scheme"
 	targetHealthPathHeader       = "X-Gozero-Target-Health-Path"
+	targetHealthPortHeader       = "X-Gozero-Target-Health-Port"
 	targetHealthRetriesHeader    = "X-Gozero-Target-Health-Retries"
 	defaultTargetHealthPath      = "/"
 	defaultTargetPort            = 443
@@ -128,6 +130,39 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		},
+		ModifyResponse: func(r *http.Response) error {
+			if loc := r.Header.Get("Location"); loc != "" {
+				config.Log.Debugf("Original Location header: %s", loc)
+				if u, err := url.Parse(loc); err == nil {
+					originalHost := u.Host
+					u.Host = r.Request.Header.Get(targetHostHeader)
+					u.Scheme = r.Request.Header.Get(targetSchemeHeader)
+					newLocation := u.String()
+					r.Header.Set("Location", newLocation)
+					config.Log.Debugf("Updated Location header from %s to %s", originalHost, r.Request.Host)
+				} else {
+					config.Log.Warnf("Failed to parse Location header %s: %v", loc, err)
+				}
+			}
+			responseData, err := httputil.DumpResponse(r, true)
+			if err != nil {
+				return err
+			}
+			config.Log.WithFields(logrus.Fields{
+				"status":          r.Status,
+				"host":            r.Request.Host,
+				"path":            r.Request.URL.Path,
+				"method":          r.Request.Method,
+				"contentLength":   r.ContentLength,
+				"requestHeaders":  r.Request.Header,
+				"responseHeaders": r.Header,
+				"body":            string(responseData),
+			}).Debug("Proxy response")
+
+			r.Header.Del("Content-Security-Policy")
+			r.Header.Del("Referrer-Policy")
+			return nil
+		},
 	}
 
 	// TODO: Think about Connection Pooling ->  MaxIdleConns , MaxIdleConnsPerHost
@@ -180,6 +215,12 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 
 	var targetHost string
 
+	originalHost := req.Host
+	originalScheme := req.URL.Scheme
+	if originalScheme == "" {
+		originalScheme = defaultTargetScheme
+	}
+
 	isDev := config.GetEnvOrDefaultString("IS_DEV", "false") == "true"
 	if isDev {
 		targetHost = "www.trivago.com"
@@ -193,10 +234,10 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 
 	config.Log.Debugf("Proxying request '%s' to '%s'", req.URL.String(), targetHost)
 
-	originalScheme := req.Header.Get(targetSchemeHeader)
-	if originalScheme == "" {
-		originalScheme = defaultTargetScheme
-		config.Log.Debugf("Target scheme is not set using default value '%s'", originalScheme)
+	scheme := req.Header.Get(targetSchemeHeader)
+	if scheme == "" {
+		scheme = defaultTargetScheme
+		config.Log.Debugf("Target scheme is not set using default value '%s'", scheme)
 	}
 
 	targetPort := req.Header.Get(targetPortHeader)
@@ -205,7 +246,13 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		config.Log.Debugf("Target port is not set using default value '%s'", targetPort)
 	}
 
-	targetURL, err := url.Parse(fmt.Sprintf("%s://%s:%s", originalScheme, targetHost, targetPort))
+	targetHealthPort := req.Header.Get(targetHealthPortHeader)
+	if targetHealthPort == "" {
+		targetHealthPort = fmt.Sprintf("%d", defaultTargetPort)
+		config.Log.Debugf("Target health port is not set using default value '%s'", targetHealthPort)
+	}
+
+	targetURL, err := url.Parse(fmt.Sprintf("%s://%s:%s", scheme, targetHost, targetPort))
 	if err != nil {
 		config.Log.Errorf("Error parsing target URL: %v", err)
 		return
@@ -232,7 +279,7 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	if _, ok := p.cache.Get(targetURL.Host); !ok {
 		config.Log.Debugf("service '%s' is not in health check cache", targetURL.Host)
 		config.Log.Debugf("Checking service availability for '%s'", targetURL.Host)
-		if err := p.checkServiceAvailability(targetURL.Host, healthPath, originalScheme, retries); err != nil {
+		if err := p.checkServiceAvailability(targetURL.Host, healthPath, scheme, retries, targetHealthPort); err != nil {
 			config.Log.Errorf("Service unavailability detected: %v", err)
 			req.URL.Scheme = "error"
 			return
@@ -249,8 +296,8 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	if _, ok := req.Header["X-Forwarded-For"]; !ok {
 		req.Header.Set("X-Forwarded-For", req.RemoteAddr)
 	}
-	req.Header.Set("X-Forwarded-Host", req.Host)
-	req.Header.Set("X-Forwarded-Proto", req.URL.Scheme)
+	req.Header.Set("X-Forwarded-Host", originalHost)
+	req.Header.Set("X-Forwarded-Proto", originalScheme)
 
 	config.Log.Debugf("Proxying request to: %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
 
@@ -281,11 +328,10 @@ func (p *HTTPReverseProxy) Requests() <-chan Requests {
 	return p.requestsCh
 }
 
-func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string, retries int) error {
-	hostname, port, err := net.SplitHostPort(host)
+func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string, retries int, healthPort string) error {
+	hostname, _, err := net.SplitHostPort(host)
 	if err != nil {
 		hostname = host
-		port = fmt.Sprintf("%d", defaultTargetPort)
 	}
 
 	client := &http.Client{
@@ -300,7 +346,7 @@ func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, sc
 	var lastErr error
 	for attempt := 0; attempt < retries; attempt++ {
 		config.Log.Debugf("Checking service availability for '%s' (attempt %d)", host, attempt)
-		healthURL := fmt.Sprintf("%s://%s:%s%s", scheme, hostname, port, path)
+		healthURL := fmt.Sprintf("%s://%s:%s%s", scheme, hostname, healthPort, path)
 		resp, err := client.Get(healthURL)
 		if err == nil {
 			defer resp.Body.Close()
