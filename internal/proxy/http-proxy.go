@@ -135,8 +135,8 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 				config.Log.Debugf("Original Location header: %s", loc)
 				if u, err := url.Parse(loc); err == nil {
 					originalHost := u.Host
-					u.Host = r.Request.Header.Get(targetHostHeader)
-					u.Scheme = r.Request.Header.Get(targetSchemeHeader)
+					u.Host = r.Request.Header.Get("X-Forwarded-Host")
+					u.Scheme = r.Request.Header.Get("X-Forwarded-Proto")
 					newLocation := u.String()
 					r.Header.Set("Location", newLocation)
 					config.Log.Debugf("Updated Location header from %s to %s", originalHost, r.Request.Host)
