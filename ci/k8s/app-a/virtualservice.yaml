@@ -15,8 +15,8 @@ spec:
           X-Gozero-Target-Port: "3000"
           X-Gozero-Target-Host: "app.app-a.svc.cluster.local"
           X-Gozero-Target-Scheme: "http"
-          X-Gozero-Target-Health-Path: "/pass"
-          X-Gozero-Target-Health-Retries: "20"
+          X-Gozero-Target-Retries: "20"
+          X-Gozero-Target-Backoff: "100ms"
     route:
     # - destination:
     #     host: app.app-a.svc.cluster.local
