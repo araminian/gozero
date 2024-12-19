@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/araminian/gozero/internal/config"
-	"github.com/araminian/gozero/internal/lock"
 	"github.com/araminian/gozero/internal/metric"
 	"github.com/araminian/gozero/internal/proxy"
 	"github.com/araminian/gozero/internal/store"
@@ -30,7 +29,6 @@ type MetricServer interface {
 
 type Server struct {
 	proxy  proxy.Proxier
-	lock   lock.Locker
 	store  Storer
 	metric MetricServer
 	done   chan struct{}
@@ -80,15 +78,12 @@ func main() {
 		panic("failed to create redis client: " + err.Error())
 	}
 
-	redisMutex := lock.NewRedisMutex(ctx, redisClient)
-
 	metricServer, err := metric.NewFiberMetricExposer(metric.WithFiberMetricExposerPath(metricPath), metric.WithFiberMetricExposerPort(metricPort))
 	if err != nil {
 		panic("failed to create metric server: " + err.Error())
 	}
 	server := &Server{
 		proxy:  httpProxy,
-		lock:   redisMutex,
 		store:  redisClient,
 		metric: metricServer,
 		done:   make(chan struct{}),
@@ -155,7 +150,6 @@ func main() {
 
 func (s *Server) processRequests(ctx context.Context) {
 	requests := s.proxy.Requests()
-	hostMutex := s.lock.NewMutex("host")
 
 	for {
 		select {
@@ -171,29 +165,20 @@ func (s *Server) processRequests(ctx context.Context) {
 
 			config.Log.Debugf("Requests :=> %+v", request)
 
-			err := hostMutex.TryLock()
-			if err != nil {
-				config.Log.Errorf("Error locking mutex for host '%s': %+v", request.Host, err)
-				continue
-			}
-
 			config.Log.Debugf("Scaling up host '%s' by %d for %s", request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
-			err = s.store.ScaleUp(request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
+			err := s.store.ScaleUp(request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
 			if err != nil {
 				config.Log.Errorf("Error scaling up host '%s': %+v", request.Host, err)
-				hostMutex.Unlock()
 				continue
 			}
 
 			keyValues, err := s.store.GetAllScaleUpKeys()
 			if err != nil {
 				config.Log.Errorf("Error getting all scale up keys: %+v", err)
-				hostMutex.Unlock()
 				continue
 			}
 
 			config.Log.Debugf("Scale up keys: %+v", keyValues)
-			hostMutex.Unlock()
 		}
 	}
 }
