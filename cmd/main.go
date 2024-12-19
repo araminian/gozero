@@ -17,11 +17,22 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type Storer interface {
+	Close() error
+	GetAllScaleUpKeys() ([]string, error)
+	ScaleUp(host string, scaleThreshold int, scaleDuration time.Duration) error
+}
+
+type MetricServer interface {
+	Start(ctx context.Context, store metric.Storer) error
+	Shutdown(ctx context.Context) error
+}
+
 type Server struct {
 	proxy  proxy.Proxier
 	lock   lock.Locker
-	store  store.Storer
-	metric metric.MetricServer
+	store  Storer
+	metric MetricServer
 	done   chan struct{}
 }
 

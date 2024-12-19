@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/araminian/gozero/internal/store"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -37,7 +36,7 @@ func WithFiberMetricExposerPath(path string) FiberMetricExposerConfig {
 type FiberMetricExposer struct {
 	port  int
 	path  string
-	store store.Storer
+	store Storer
 	app   *fiber.App
 }
 
@@ -67,7 +66,7 @@ func NewFiberMetricExposer(configs ...FiberMetricExposerConfig) (*FiberMetricExp
 	}, nil
 }
 
-func (m *FiberMetricExposer) Start(ctx context.Context, store store.Storer) error {
+func (m *FiberMetricExposer) Start(ctx context.Context, store Storer) error {
 	m.store = store
 	m.app = fiber.New()
 

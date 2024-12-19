@@ -1,12 +1,5 @@
 package metric
 
-import (
-	"context"
-
-	"github.com/araminian/gozero/internal/store"
-)
-
-type MetricServer interface {
-	Start(ctx context.Context, store store.Storer) error
-	Shutdown(ctx context.Context) error
+type Storer interface {
+	GetAllScaleUpKeysValues() (map[string]string, error)
 }
