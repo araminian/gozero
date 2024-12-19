@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/patrickmn/go-cache"
+	"github.com/eapache/go-resiliency/retrier"
 	"github.com/sirupsen/logrus"
 
 	"github.com/araminian/gozero/internal/config"
@@ -25,20 +24,15 @@ const (
 	defaultTimeout               = 10 * time.Minute
 	defaultPort                  = 8443
 	defaultBuffer                = 1000
-	defaultCacheDuration         = 3 * time.Minute
-	defaultCacheCleanup          = 10 * time.Minute
 	targetHostHeader             = "X-Gozero-Target-Host"
 	targetPortHeader             = "X-Gozero-Target-Port"
 	targetSchemeHeader           = "X-Gozero-Target-Scheme"
-	targetHealthPathHeader       = "X-Gozero-Target-Health-Path"
-	targetHealthPortHeader       = "X-Gozero-Target-Health-Port"
-	targetHealthRetriesHeader    = "X-Gozero-Target-Health-Retries"
-	defaultTargetHealthPath      = "/"
+	targetRetriesHeader          = "X-Gozero-Target-Retries"
+	targetBackoffHeader          = "X-Gozero-Target-Backoff"
 	defaultTargetPort            = 443
 	defaultTargetScheme          = "https"
 	defaultMaxRetries            = 20
 	defaultInitialBackoff        = 100 * time.Millisecond
-	defaultMaxBackoff            = 2 * time.Second
 	defaultIdleTimeout           = 120 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
 	defaultResponseHeaderTimeout = 30 * time.Second
@@ -57,8 +51,6 @@ type HTTPReverseProxy struct {
 
 	requestBufferSize int
 	requestsCh        chan Requests
-
-	cache *cache.Cache
 }
 
 func WithBufferSize(buffer int) HTTPReverseProxyConfig {
@@ -111,8 +103,57 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 		listenPort:        listenPort,
 		requestBufferSize: requestBufferSize,
 		requestsCh:        make(chan Requests, requestBufferSize),
-		cache:             cache.New(defaultCacheDuration, defaultCacheCleanup),
 	}, nil
+}
+
+type retryRoundTripper struct {
+	next http.RoundTripper
+}
+
+func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+
+	maxRetries, err := strconv.Atoi(req.Header.Get(targetRetriesHeader))
+	if err != nil {
+		maxRetries = defaultMaxRetries
+	}
+
+	backoff, err := time.ParseDuration(req.Header.Get(targetBackoffHeader))
+	if err != nil {
+		backoff = defaultInitialBackoff
+	}
+
+	re := retrier.New(retrier.ExponentialBackoff(maxRetries, backoff), nil)
+
+	var resp *http.Response
+	var respErr error
+
+	targetHost := req.Host
+	originalHost := req.Header.Get("X-Forwarded-Host")
+
+	respErr = re.Run(func() error {
+		config.Log.Debugf("Retrying request to '%s' -> '%s'", originalHost, targetHost)
+		resp, respErr = rr.next.RoundTrip(req)
+		if respErr != nil {
+			config.Log.Debugf("Request failed, will retry: %v", respErr)
+			return respErr
+		}
+		// TODO: Should i check for 404?
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusNotFound {
+			msg := fmt.Sprintf("service '%s' -> '%s' is not available: %d. Retrying...", originalHost, targetHost, resp.StatusCode)
+			config.Log.Debugf(msg)
+			return errors.New(msg)
+		}
+
+		return nil
+	})
+
+	if respErr != nil {
+		msg := fmt.Sprintf("all retry attempts failed for service '%s' -> '%s': %v", originalHost, targetHost, respErr)
+		config.Log.Errorf(msg)
+		return resp, errors.New(msg)
+	}
+
+	return resp, nil
 }
 
 func (p *HTTPReverseProxy) Shutdown(ctx context.Context) error {
@@ -166,13 +207,15 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	}
 
 	// TODO: Think about Connection Pooling ->  MaxIdleConns , MaxIdleConnsPerHost
-	proxy.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+	proxy.Transport = &retryRoundTripper{
+		next: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+			IdleConnTimeout:       defaultIdleTimeout,
+			TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+			ResponseHeaderTimeout: defaultResponseHeaderTimeout,
 		},
-		IdleConnTimeout:       defaultIdleTimeout,
-		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
-		ResponseHeaderTimeout: defaultResponseHeaderTimeout,
 	}
 
 	tlsConfig := &tls.Config{
@@ -246,12 +289,6 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		config.Log.Debugf("Target port is not set using default value '%s'", targetPort)
 	}
 
-	targetHealthPort := req.Header.Get(targetHealthPortHeader)
-	if targetHealthPort == "" {
-		targetHealthPort = fmt.Sprintf("%d", defaultTargetPort)
-		config.Log.Debugf("Target health port is not set using default value '%s'", targetHealthPort)
-	}
-
 	targetURL, err := url.Parse(fmt.Sprintf("%s://%s:%s", scheme, targetHost, targetPort))
 	if err != nil {
 		config.Log.Errorf("Error parsing target URL: %v", err)
@@ -264,29 +301,6 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		Path: path,
 	}
 	config.Log.Debugf("Sending request to '%s'", path)
-
-	healthPath := req.Header.Get(targetHealthPathHeader)
-	if healthPath == "" {
-		healthPath = defaultTargetHealthPath
-		config.Log.Debugf("Target health path is not set using default value '%s'", healthPath)
-	}
-	retries, err := strconv.Atoi(req.Header.Get(targetHealthRetriesHeader))
-	if err != nil {
-		retries = defaultMaxRetries
-		config.Log.Debugf("Target health retries is not set using default value '%d'", retries)
-	}
-
-	if _, ok := p.cache.Get(targetURL.Host); !ok {
-		config.Log.Debugf("service '%s' is not in health check cache", targetURL.Host)
-		config.Log.Debugf("Checking service availability for '%s'", targetURL.Host)
-		if err := p.checkServiceAvailability(targetURL.Host, healthPath, scheme, retries, targetHealthPort); err != nil {
-			config.Log.Errorf("Service unavailability detected: %v", err)
-			req.URL.Scheme = "error"
-			return
-		}
-		config.Log.Debugf("Service '%s' is available, adding to cache", targetURL.Host)
-		p.cache.Set(targetURL.Host, struct{}{}, defaultCacheDuration)
-	}
 
 	req.URL.Scheme = targetURL.Scheme
 	req.URL.Host = targetURL.Host
@@ -326,46 +340,4 @@ func joinURLPath(a, b *url.URL) (path, rawpath string) {
 
 func (p *HTTPReverseProxy) Requests() <-chan Requests {
 	return p.requestsCh
-}
-
-func (p *HTTPReverseProxy) checkServiceAvailability(host string, path string, scheme string, retries int, healthPort string) error {
-	hostname, _, err := net.SplitHostPort(host)
-	if err != nil {
-		hostname = host
-	}
-
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < retries; attempt++ {
-		config.Log.Debugf("Checking service availability for '%s' (attempt %d)", host, attempt)
-		healthURL := fmt.Sprintf("%s://%s:%s%s", scheme, hostname, healthPort, path)
-		resp, err := client.Get(healthURL)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil
-			}
-			config.Log.Debugf("Health check failed '%s' with status code: %d", healthURL, resp.StatusCode)
-			lastErr = fmt.Errorf("health check failed with status code: %d", resp.StatusCode)
-		} else {
-			config.Log.Debugf("Health check failed '%s' with error: %v", healthURL, err)
-			lastErr = err
-		}
-
-		backoff := defaultInitialBackoff * time.Duration(1<<attempt)
-		if backoff > defaultMaxBackoff {
-			backoff = defaultMaxBackoff
-		}
-		config.Log.Debugf("Backing off for host '%s' for %s", host, backoff)
-		time.Sleep(backoff)
-	}
-	return fmt.Errorf("service unavailable after %d attempts: %v", retries, lastErr)
 }
