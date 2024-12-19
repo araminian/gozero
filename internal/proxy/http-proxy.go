@@ -162,7 +162,7 @@ func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	})
 
 	if respErr != nil {
-		msg := fmt.Sprintf("all retry attempts failed for service '%s' -> '%s': %v", originalHost, targetHost, respErr)
+		msg := fmt.Sprintf("all retry attempts failed for service '%s' -> '%s': %v. Service failed to scaled up or not passing probes", originalHost, targetHost, respErr)
 		config.Log.Errorf(msg)
 		return resp, errors.New(msg)
 	}
