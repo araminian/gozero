@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -36,6 +37,7 @@ const (
 	defaultIdleTimeout           = 120 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
 	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultDialTimeout           = 300 * time.Second
 )
 
 type httpReverseProxyConfig struct {
@@ -215,6 +217,7 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 			IdleConnTimeout:       defaultIdleTimeout,
 			TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 			ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+			DialContext:           (&net.Dialer{Timeout: defaultDialTimeout}).DialContext,
 		},
 	}
 
