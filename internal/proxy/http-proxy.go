@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -140,10 +142,20 @@ func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			return respErr
 		}
 		// TODO: Should i check for 404?
-		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusNotFound {
-			msg := fmt.Sprintf("service '%s' -> '%s' is not available: %d. Retrying...", originalHost, targetHost, resp.StatusCode)
-			config.Log.Debugf(msg)
-			return errors.New(msg)
+
+		noHealthyUpstreamValue := "no healthy upstream"
+		noHealthyUpstreamStatusCode := http.StatusServiceUnavailable
+
+		if resp.StatusCode == noHealthyUpstreamStatusCode {
+			bodyBytes, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			if err == nil && strings.Contains(string(bodyBytes), noHealthyUpstreamValue) {
+				msg := fmt.Sprintf("service '%s' -> '%s' is not available: status code: %d", originalHost, targetHost, resp.StatusCode)
+				config.Log.Debugf(msg)
+				return errors.New(msg)
+			}
 		}
 
 		return nil
