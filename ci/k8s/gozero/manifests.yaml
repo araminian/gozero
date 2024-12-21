@@ -23,12 +23,12 @@ spec:
     spec:
       containers:
       - name: gozero
-        image: rminz/gozero:0.0.10
+        image: rminz/gozero:0.1.4
         env:
         - name: REDIS_ADDR
           value: redis.gozero.svc.cluster.local
         - name: LOG_LEVEL
-          value: info
+          value: debug
         resources:
           limits:
             memory: "128Mi"
