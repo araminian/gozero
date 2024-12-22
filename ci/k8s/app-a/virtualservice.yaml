@@ -29,3 +29,15 @@ spec:
     retries:
       attempts: 1
       perTryTimeout: 300s
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: app
+  namespace: app-a
+spec:
+  host: app.app-a.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        useClientProtocol: true
