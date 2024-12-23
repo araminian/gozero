@@ -177,65 +177,74 @@ func (p *HTTPReverseProxy) Shutdown(ctx context.Context) error {
 	return p.httpServer.Shutdown(ctx)
 }
 
-func (p *HTTPReverseProxy) Start(ctx context.Context) error {
-	proxy := &httputil.ReverseProxy{
-		Director: p.httpDirector,
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if r.URL.Scheme == "error" {
-				http.Error(w, "Service unavailable or starting up", http.StatusServiceUnavailable)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusBadGateway)
-		},
-		ModifyResponse: func(r *http.Response) error {
-			if loc := r.Header.Get("Location"); loc != "" {
-				config.Log.Debugf("Original Location header: %s", loc)
-				if u, err := url.Parse(loc); err == nil {
-					originalHost := u.Host
-					u.Host = r.Request.Header.Get("X-Forwarded-Host")
-					u.Scheme = r.Request.Header.Get("X-Forwarded-Proto")
-					newLocation := u.String()
-					r.Header.Set("Location", newLocation)
-					config.Log.Debugf("Updated Location header from %s to %s", originalHost, r.Request.Host)
-				} else {
-					config.Log.Warnf("Failed to parse Location header %s: %v", loc, err)
-				}
-			}
-			responseData, err := httputil.DumpResponse(r, true)
-			if err != nil {
-				return err
-			}
-			config.Log.WithFields(logrus.Fields{
-				"status":          r.Status,
-				"host":            r.Request.Host,
-				"path":            r.Request.URL.Path,
-				"method":          r.Request.Method,
-				"contentLength":   r.ContentLength,
-				"requestHeaders":  r.Request.Header,
-				"responseHeaders": r.Header,
-				"body":            string(responseData),
-			}).Debug("Proxy response")
+func handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
+	if r.URL.Scheme == "error" {
+		http.Error(w, "Service unavailable or starting up", http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadGateway)
+}
 
-			r.Header.Del("Content-Security-Policy")
-			r.Header.Del("Referrer-Policy")
-			return nil
+func modifyProxyResponse(r *http.Response) error {
+	if loc := r.Header.Get("Location"); loc != "" {
+		config.Log.Debugf("Original Location header: %s", loc)
+		if u, err := url.Parse(loc); err == nil {
+			originalHost := u.Host
+			u.Host = r.Request.Header.Get("X-Forwarded-Host")
+			u.Scheme = r.Request.Header.Get("X-Forwarded-Proto")
+			newLocation := u.String()
+			r.Header.Set("Location", newLocation)
+			config.Log.Debugf("Updated Location header from %s to %s", originalHost, r.Request.Host)
+		} else {
+			config.Log.Warnf("Failed to parse Location header %s: %v", loc, err)
+		}
+	}
+	responseData, err := httputil.DumpResponse(r, true)
+	if err != nil {
+		return err
+	}
+	config.Log.WithFields(logrus.Fields{
+		"status":          r.Status,
+		"host":            r.Request.Host,
+		"path":            r.Request.URL.Path,
+		"method":          r.Request.Method,
+		"contentLength":   r.ContentLength,
+		"requestHeaders":  r.Request.Header,
+		"responseHeaders": r.Header,
+		"body":            string(responseData),
+	}).Debug("Proxy response")
+
+	r.Header.Del("Content-Security-Policy")
+	r.Header.Del("Referrer-Policy")
+	return nil
+}
+
+func (p *HTTPReverseProxy) Start(ctx context.Context) error {
+
+	http2Transport := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return net.Dial(network, addr)
 		},
+	}
+
+	http1Transport := &http.Transport{
+		IdleConnTimeout:       defaultIdleTimeout,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+		ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+		DialContext: (&net.Dialer{
+			Timeout: defaultDialTimeout,
+		}).DialContext,
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Director:       p.httpDirector,
+		ErrorHandler:   handleProxyError,
+		ModifyResponse: modifyProxyResponse,
 		Transport: &retryRoundTripper{
 			next: &conditionalTransport{
-				h2Transport: &http2.Transport{
-					AllowHTTP: true,
-					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-						return net.Dial(network, addr)
-					},
-				},
-				h1Transport: &http.Transport{
-					IdleConnTimeout:       defaultIdleTimeout,
-					TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
-					ResponseHeaderTimeout: defaultResponseHeaderTimeout,
-					DialContext: (&net.Dialer{
-						Timeout: defaultDialTimeout,
-					}).DialContext,
-				},
+				h2Transport: http2Transport,
+				h1Transport: http1Transport,
 			},
 		},
 	}
