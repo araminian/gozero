@@ -17,6 +17,8 @@ import (
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/araminian/gozero/internal/config"
 )
@@ -218,37 +220,45 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 			r.Header.Del("Referrer-Policy")
 			return nil
 		},
-	}
-
-	// TODO: Think about Connection Pooling ->  MaxIdleConns , MaxIdleConnsPerHost
-	proxy.Transport = &retryRoundTripper{
-		next: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+		Transport: &retryRoundTripper{
+			next: &conditionalTransport{
+				h2Transport: &http2.Transport{
+					AllowHTTP: true,
+					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+						return net.Dial(network, addr)
+					},
+				},
+				h1Transport: &http.Transport{
+					IdleConnTimeout:       defaultIdleTimeout,
+					TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+					ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+					DialContext: (&net.Dialer{
+						Timeout: defaultDialTimeout,
+					}).DialContext,
+				},
 			},
-			IdleConnTimeout:       defaultIdleTimeout,
-			TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
-			ResponseHeaderTimeout: defaultResponseHeaderTimeout,
-			DialContext:           (&net.Dialer{Timeout: defaultDialTimeout}).DialContext,
 		},
 	}
 
-	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true,
-	}
+	h2s := &http2.Server{}
+
+	handler := h2c.NewHandler(proxy, h2s)
 
 	server := &http.Server{
-		Addr:      fmt.Sprintf(":%d", p.listenPort),
-		TLSConfig: tlsConfig,
-		Handler:   proxy,
+		Addr:    fmt.Sprintf(":%d", p.listenPort),
+		Handler: handler,
+	}
+
+	err := http2.ConfigureServer(server, h2s)
+	if err != nil {
+		config.Log.Errorf("Error configuring HTTP/2 server: %+v", err)
+		panic(err)
 	}
 
 	p.httpServer = server
 
 	go func() {
 		config.Log.Infof("Starting reverse proxy server on port %d", p.listenPort)
-		//err := server.ListenAndServeTLS("server.crt", "server.key")
 		err := server.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			config.Log.Errorf("Error starting reverse proxy server: %+v", err)
@@ -267,6 +277,20 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+type conditionalTransport struct {
+	h2Transport *http2.Transport
+	h1Transport *http.Transport
+}
+
+func (t *conditionalTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Proto == "HTTP/2.0" {
+		config.Log.Debugf("Protocol: %s, Using HTTP/2 transport for request %s", req.Proto, req.URL.String())
+		return t.h2Transport.RoundTrip(req)
+	}
+	config.Log.Debugf("Protocol: %s, Using HTTP/1.1 transport for request %s", req.Proto, req.URL.String())
+	return t.h1Transport.RoundTrip(req)
 }
 
 func (p *HTTPReverseProxy) httpDirector(req *http.Request) {

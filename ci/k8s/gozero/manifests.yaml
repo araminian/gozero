@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: gozero
-        image: rminz/gozero:0.1.4
+        image: rminz/gozero:0.2.4
         env:
         - name: REDIS_ADDR
           value: redis.gozero.svc.cluster.local
@@ -52,3 +52,32 @@ spec:
   - port: 9090
     name: metrics
     targetPort: 9090
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: gozero
+  namespace: gozero
+spec:
+  host: gozero.gozero.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        h2UpgradePolicy: UPGRADE
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: gozero
+  namespace: gozero
+spec:
+  hosts:
+  - gozero.gozero.svc.cluster.local
+  exportTo:
+  - "*"
+  http:
+  - route:
+    - destination:
+        host: gozero.gozero.svc.cluster.local
+        port:
+          number: 8443
