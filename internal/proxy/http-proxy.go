@@ -51,7 +51,6 @@ type httpReverseProxyConfig struct {
 }
 
 type HTTPReverseProxy struct {
-	timeout    time.Duration
 	listenPort int
 	httpServer *http.Server
 
@@ -88,13 +87,9 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 		}
 	}
 	var (
-		timeout           time.Duration = defaultTimeout
-		listenPort        int           = defaultPort
-		requestBufferSize int           = defaultBuffer
+		listenPort        int = defaultPort
+		requestBufferSize int = defaultBuffer
 	)
-	if cfg.timeout != nil {
-		timeout = *cfg.timeout
-	}
 
 	if cfg.listenPort != nil {
 		listenPort = *cfg.listenPort
@@ -105,7 +100,6 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 	}
 
 	return &HTTPReverseProxy{
-		timeout:           timeout,
 		listenPort:        listenPort,
 		requestBufferSize: requestBufferSize,
 		requestsCh:        make(chan Requests, requestBufferSize),
