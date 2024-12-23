@@ -45,7 +45,6 @@ const (
 )
 
 type httpReverseProxyConfig struct {
-	timeout       *time.Duration
 	listenPort    *int
 	requestBuffer *int
 }
@@ -61,13 +60,6 @@ type HTTPReverseProxy struct {
 func WithBufferSize(buffer int) HTTPReverseProxyConfig {
 	return func(cfg *httpReverseProxyConfig) error {
 		cfg.requestBuffer = &buffer
-		return nil
-	}
-}
-
-func WithTimeout(timeout time.Duration) HTTPReverseProxyConfig {
-	return func(cfg *httpReverseProxyConfig) error {
-		cfg.timeout = &timeout
 		return nil
 	}
 }

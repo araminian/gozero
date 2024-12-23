@@ -38,7 +38,6 @@ const (
 	defaultProxyPort       = 8443
 	defaultMetricPort      = 9090
 	defaultMetricPath      = "/metrics"
-	defaultTimeout         = 1 * time.Minute
 	defaultBuffer          = 1000
 	defaultRedisPort       = 6379
 	defaultRedisAddr       = "localhost"
@@ -52,7 +51,6 @@ func main() {
 	proxyPort := config.GetEnvOrDefaultInt("PROXY_PORT", defaultProxyPort)
 	metricPort := config.GetEnvOrDefaultInt("METRIC_PORT", defaultMetricPort)
 	metricPath := config.GetEnvOrDefaultString("METRIC_PATH", defaultMetricPath)
-	requestTimeout := config.GetEnvOrDefaultDuration("REQUEST_TIMEOUT", defaultTimeout)
 	buffer := config.GetEnvOrDefaultInt("REQUEST_BUFFER", defaultBuffer)
 	redisAddr := config.GetEnvOrDefaultString("REDIS_ADDR", defaultRedisAddr)
 	redisPort := config.GetEnvOrDefaultInt("REDIS_PORT", defaultRedisPort)
@@ -68,7 +66,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	httpProxy, err := proxy.NewHTTPReverseProxy(proxy.WithListenPort(proxyPort), proxy.WithTimeout(requestTimeout), proxy.WithBufferSize(buffer))
+	httpProxy, err := proxy.NewHTTPReverseProxy(proxy.WithListenPort(proxyPort), proxy.WithBufferSize(buffer))
 	if err != nil {
 		panic("failed to create http proxy: " + err.Error())
 	}
