@@ -76,3 +76,14 @@ spec:
     retries:
       attempts: 1
       perTryTimeout: 300s
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: grpc-server
+  namespace: grpc-server
+spec:
+  host: grpc-server
+  trafficPolicy:
+    tls:
+      mode: DISABLE
