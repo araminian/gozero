@@ -13,7 +13,8 @@ import (
 	"github.com/araminian/gozero/internal/metric"
 	"github.com/araminian/gozero/internal/proxy"
 	"github.com/araminian/gozero/internal/store"
-	"github.com/sirupsen/logrus"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type Storer interface {
@@ -56,12 +57,11 @@ func main() {
 	redisPort := config.GetEnvOrDefaultInt("REDIS_PORT", defaultRedisPort)
 	logLevel := config.GetEnvOrDefaultString("LOG_LEVEL", defaultLogLevel)
 
-	config.Log = logrus.New()
-	level, err := logrus.ParseLevel(logLevel)
+	logLevelObj, err := zapcore.ParseLevel(logLevel)
 	if err != nil {
-		level = logrus.InfoLevel
+		logLevelObj = zapcore.InfoLevel
 	}
-	config.Log.SetLevel(level)
+	config.InitLogger(logLevelObj)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -100,7 +100,7 @@ func main() {
 			config.Log.Info("Metric server shutdown complete")
 		}()
 		if err := server.metric.Start(ctx, redisClient); err != nil && !errors.Is(err, context.Canceled) {
-			config.Log.Errorf("metric server error: %+v", err)
+			config.Log.Error("metric server error", zap.Error(err))
 		}
 	}()
 
@@ -111,7 +111,7 @@ func main() {
 			config.Log.Info("Proxy server shutdown complete")
 		}()
 		if err := server.proxy.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			config.Log.Errorf("proxy server error: %+v", err)
+			config.Log.Error("proxy server error", zap.Error(err))
 		}
 	}()
 
@@ -140,7 +140,7 @@ func main() {
 	}
 
 	if err := server.store.Close(); err != nil {
-		config.Log.Errorf("Error closing store: %+v", err)
+		config.Log.Error("Error closing store", zap.Error(err))
 	}
 
 	config.Log.Info("Shutdown complete")
@@ -161,22 +161,22 @@ func (s *Server) processRequests(ctx context.Context) {
 				return
 			}
 
-			config.Log.Debugf("Requests :=> %+v", request)
+			config.Log.Debug("Received request", zap.Any("request", request))
 
-			config.Log.Debugf("Scaling up host '%s' by %d for %s", request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
+			config.Log.Debug("Scaling up host", zap.String("host", request.Host), zap.Int("target", defaultScaleUpTarget), zap.Duration("duration", defaultScaleUpDuration))
 			err := s.store.ScaleUp(request.Host, defaultScaleUpTarget, defaultScaleUpDuration)
 			if err != nil {
-				config.Log.Errorf("Error scaling up host '%s': %+v", request.Host, err)
+				config.Log.Error("Error scaling up host", zap.String("host", request.Host), zap.Error(err))
 				continue
 			}
 
 			keyValues, err := s.store.GetAllScaleUpKeys()
 			if err != nil {
-				config.Log.Errorf("Error getting all scale up keys: %+v", err)
+				config.Log.Error("Error getting all scale up keys", zap.Error(err))
 				continue
 			}
 
-			config.Log.Debugf("Scale up keys: %+v", keyValues)
+			config.Log.Debug("Scale up keys", zap.Any("keys", keyValues))
 		}
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/eapache/go-resiliency/retrier"
-	"github.com/sirupsen/logrus"
+	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -123,10 +123,10 @@ func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	originalHost := req.Header.Get("X-Forwarded-Host")
 
 	respErr = re.Run(func() error {
-		config.Log.Debugf("Retrying request to '%s' -> '%s'", originalHost, targetHost)
+		config.Log.Debug("Sending request", zap.String("from", originalHost), zap.String("to", targetHost))
 		resp, respErr = rr.next.RoundTrip(req)
 		if respErr != nil {
-			config.Log.Debugf("Request failed, will retry: %v", respErr)
+			config.Log.Debug("Request failed, will retry", zap.Error(respErr), zap.String("from", originalHost), zap.String("to", targetHost))
 			return respErr
 		}
 		// TODO: Should i check for 404?
@@ -141,7 +141,7 @@ func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 			if err == nil && strings.Contains(string(bodyBytes), noHealthyUpstreamValue) {
 				msg := fmt.Sprintf("service '%s' -> '%s' is not available: status code: %d", originalHost, targetHost, resp.StatusCode)
-				config.Log.Debugf(msg)
+				config.Log.Debug("service is not available", zap.String("Status", resp.Status), zap.String("from", originalHost), zap.String("to", targetHost))
 				return errors.New(msg)
 			}
 		}
@@ -151,7 +151,7 @@ func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 	if respErr != nil {
 		msg := fmt.Sprintf("all retry attempts failed for service '%s' -> '%s': %v. Service failed to scaled up or not passing probes", originalHost, targetHost, respErr)
-		config.Log.Errorf(msg)
+		config.Log.Error("all retry attempts failed", zap.String("from", originalHost), zap.String("To", targetHost), zap.Error(respErr))
 		return resp, errors.New(msg)
 	}
 
@@ -173,32 +173,22 @@ func handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
 
 func modifyProxyResponse(r *http.Response) error {
 	if loc := r.Header.Get("Location"); loc != "" {
-		config.Log.Debugf("Original Location header: %s", loc)
 		if u, err := url.Parse(loc); err == nil {
 			originalHost := u.Host
 			u.Host = r.Request.Header.Get("X-Forwarded-Host")
 			u.Scheme = r.Request.Header.Get("X-Forwarded-Proto")
 			newLocation := u.String()
 			r.Header.Set("Location", newLocation)
-			config.Log.Debugf("Updated Location header from %s to %s", originalHost, r.Request.Host)
+			config.Log.Debug("Updated Location header", zap.String("from", originalHost), zap.String("to", r.Request.Host))
 		} else {
-			config.Log.Warnf("Failed to parse Location header %s: %v", loc, err)
+			config.Log.Warn("Failed to parse Location header", zap.String("Location", loc), zap.Error(err))
 		}
 	}
 	responseData, err := httputil.DumpResponse(r, true)
 	if err != nil {
 		return err
 	}
-	config.Log.WithFields(logrus.Fields{
-		"status":          r.Status,
-		"host":            r.Request.Host,
-		"path":            r.Request.URL.Path,
-		"method":          r.Request.Method,
-		"contentLength":   r.ContentLength,
-		"requestHeaders":  r.Request.Header,
-		"responseHeaders": r.Header,
-		"body":            string(responseData),
-	}).Debug("Proxy response")
+	config.Log.Debug("Proxy response", zap.String("status", r.Status), zap.String("host", r.Request.Host), zap.String("path", r.Request.URL.Path), zap.String("method", r.Request.Method), zap.Int64("contentLength", r.ContentLength), zap.Any("requestHeaders", r.Request.Header), zap.Any("responseHeaders", r.Header), zap.String("body", string(responseData)))
 
 	r.Header.Del("Content-Security-Policy")
 	r.Header.Del("Referrer-Policy")
@@ -246,29 +236,29 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 
 	err := http2.ConfigureServer(server, h2s)
 	if err != nil {
-		config.Log.Errorf("Error configuring HTTP/2 server: %+v", err)
+		config.Log.Error("Error configuring HTTP/2 server", zap.Error(err))
 		panic(err)
 	}
 
 	p.httpServer = server
 
 	go func() {
-		config.Log.Infof("Starting reverse proxy server on port %d", p.listenPort)
+		config.Log.Info("Starting reverse proxy server", zap.Int("port", p.listenPort))
 		err := server.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			config.Log.Errorf("Error starting reverse proxy server: %+v", err)
+			config.Log.Error("Error starting reverse proxy server", zap.Error(err))
 			return
 		}
 	}()
 
 	<-ctx.Done()
 
-	config.Log.Debugf("Reverse proxy server on port %d shutting down...", p.listenPort)
+	config.Log.Info("Reverse proxy server shutting down", zap.Int("port", p.listenPort))
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		config.Log.Errorf("Failed to shutdown reverse proxy server: %+v", err)
+		config.Log.Error("Failed to shutdown reverse proxy server", zap.Error(err))
 	}
 
 	return nil
@@ -281,10 +271,10 @@ type conditionalTransport struct {
 
 func (t *conditionalTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Proto == "HTTP/2.0" {
-		config.Log.Debugf("Protocol: %s, Using HTTP/2 transport for request %s", req.Proto, req.URL.String())
+		config.Log.Debug("Protocol: HTTP/2.0, Using HTTP/2 transport for request", zap.String("url", req.URL.String()))
 		return t.h2Transport.RoundTrip(req)
 	}
-	config.Log.Debugf("Protocol: %s, Using HTTP/1.1 transport for request %s", req.Proto, req.URL.String())
+	config.Log.Debug("Protocol: HTTP/1.1, Using HTTP/1.1 transport for request", zap.String("url", req.URL.String()))
 	return t.h1Transport.RoundTrip(req)
 }
 
@@ -304,28 +294,28 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	} else {
 		targetHost = req.Header.Get(targetHostHeader)
 		if targetHost == "" {
-			config.Log.Errorf("Target host is not set using header %s", targetHostHeader)
+			config.Log.Error("Target host is not set", zap.String("header", targetHostHeader))
 			return
 		}
 	}
 
-	config.Log.Debugf("Proxying request '%s' to '%s'", req.URL.String(), targetHost)
+	config.Log.Debug("Proxying request", zap.String("from", req.URL.String()), zap.String("to", targetHost))
 
 	scheme := req.Header.Get(targetSchemeHeader)
 	if scheme == "" {
 		scheme = defaultTargetScheme
-		config.Log.Debugf("Target scheme is not set using default value '%s'", scheme)
+		config.Log.Debug("Target scheme is not set", zap.String("scheme", scheme), zap.String("from", req.URL.String()), zap.String("to", targetHost))
 	}
 
 	targetPort := req.Header.Get(targetPortHeader)
 	if targetPort == "" {
 		targetPort = fmt.Sprintf("%d", defaultTargetPort)
-		config.Log.Debugf("Target port is not set using default value '%s'", targetPort)
+		config.Log.Debug("Target port is not set", zap.String("port", targetPort), zap.String("from", req.URL.String()), zap.String("to", targetHost))
 	}
 
 	targetURL, err := url.Parse(fmt.Sprintf("%s://%s:%s", scheme, targetHost, targetPort))
 	if err != nil {
-		config.Log.Errorf("Error parsing target URL: %v", err)
+		config.Log.Error("Error parsing target URL", zap.Error(err), zap.String("from", req.URL.String()), zap.String("to", targetHost))
 		return
 	}
 
@@ -334,7 +324,7 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 		Host: targetURL.Host,
 		Path: path,
 	}
-	config.Log.Debugf("Sending request to '%s'", path)
+	config.Log.Debug("Sending request", zap.String("path", path), zap.String("from", req.URL.String()), zap.String("to", targetHost))
 
 	req.URL.Scheme = targetURL.Scheme
 	req.URL.Host = targetURL.Host
@@ -347,7 +337,7 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	req.Header.Set("X-Forwarded-Host", originalHost)
 	req.Header.Set("X-Forwarded-Proto", originalScheme)
 
-	config.Log.Debugf("Proxying request to: %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+	config.Log.Debug("Proxying request", zap.String("scheme", req.URL.Scheme), zap.String("url", req.URL.String()), zap.String("to", targetHost))
 
 }
 

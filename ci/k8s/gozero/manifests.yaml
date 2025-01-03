@@ -23,7 +23,8 @@ spec:
     spec:
       containers:
       - name: gozero
-        image: rminz/gozero:0.2.4
+        image: rminz/gozero:0.2.5
+        imagePullPolicy: Always
         env:
         - name: REDIS_ADDR
           value: redis.gozero.svc.cluster.local
