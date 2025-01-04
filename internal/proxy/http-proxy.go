@@ -163,7 +163,7 @@ func (p *HTTPReverseProxy) Shutdown(ctx context.Context) error {
 	return p.httpServer.Shutdown(ctx)
 }
 
-func handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
+func (p *HTTPReverseProxy) handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
 	if r.URL.Scheme == "error" {
 		http.Error(w, "Service unavailable or starting up", http.StatusServiceUnavailable)
 		return
@@ -171,7 +171,7 @@ func handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
 	http.Error(w, err.Error(), http.StatusBadGateway)
 }
 
-func modifyProxyResponse(r *http.Response) error {
+func (p *HTTPReverseProxy) modifyProxyResponse(r *http.Response) error {
 	if loc := r.Header.Get("Location"); loc != "" {
 		if u, err := url.Parse(loc); err == nil {
 			originalHost := u.Host
@@ -215,8 +215,8 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 
 	proxy := &httputil.ReverseProxy{
 		Director:       p.httpDirector,
-		ErrorHandler:   handleProxyError,
-		ModifyResponse: modifyProxyResponse,
+		ErrorHandler:   p.handleProxyError,
+		ModifyResponse: p.modifyProxyResponse,
 		Transport: &retryRoundTripper{
 			next: &conditionalTransport{
 				h2Transport: http2Transport,
