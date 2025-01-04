@@ -221,3 +221,20 @@ func TestHTTPReverseProxyHTTP2(t *testing.T) {
 		t.Fatalf("expected status code to be %d, got %d", http.StatusInternalServerError, failResponse.StatusCode)
 	}
 }
+
+func TestHTTPReverseProxyGRPC(t *testing.T) {
+
+	t.Skip("skipping grpc test, need to implement")
+	config.InitLogger(zapcore.ErrorLevel)
+	proxy, err := NewHTTPReverseProxy(WithListenPort(8080), WithBufferSize(1024))
+	if err != nil {
+		t.Fatalf("failed to create http proxy: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go proxy.Start(ctx)
+	defer proxy.Shutdown(ctx)
+
+}
