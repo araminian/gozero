@@ -6,13 +6,20 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/araminian/gozero/internal/config"
+	grpcclient "github.com/araminian/grpc-simple-app/client"
+	pb "github.com/araminian/grpc-simple-app/proto/todo/v2"
+	grpcserver "github.com/araminian/grpc-simple-app/server"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestHTTPReverseProxy(t *testing.T) {
@@ -224,7 +231,7 @@ func TestHTTPReverseProxyHTTP2(t *testing.T) {
 
 func TestHTTPReverseProxyGRPC(t *testing.T) {
 
-	t.Skip("skipping grpc test, need to implement")
+	// client -> proxy -> server
 	config.InitLogger(zapcore.ErrorLevel)
 	proxy, err := NewHTTPReverseProxy(WithListenPort(8080), WithBufferSize(1024))
 	if err != nil {
@@ -237,4 +244,96 @@ func TestHTTPReverseProxyGRPC(t *testing.T) {
 	go proxy.Start(ctx)
 	defer proxy.Shutdown(ctx)
 
+	// server
+	listener, err := net.Listen("tcp", "localhost:8081")
+	if err != nil {
+		t.Fatalf("failed to listen for grpc server: %v", err)
+	}
+
+	server, err := grpcserver.NewServer()
+	if err != nil {
+		t.Fatalf("failed to create grpc server: %v", err)
+	}
+
+	// Create a WaitGroup to ensure server is fully stopped
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.Serve(listener); err != nil && err != grpc.ErrServerStopped {
+			t.Errorf("failed to serve grpc server: %v", err)
+		}
+	}()
+
+	// Cleanup in reverse order of creation
+	defer func() {
+		server.GracefulStop() // Use GracefulStop instead of Stop
+		listener.Close()
+		wg.Wait() // Wait for server to fully stop
+	}()
+
+	// client
+	client, conn, err := grpcclient.NewClient("localhost:8080")
+	defer func(conn *grpc.ClientConn) {
+		if err := conn.Close(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}(conn)
+	if err != nil {
+		t.Fatalf("failed to create grpc client: %v", err)
+	}
+
+	mask, err := grpcclient.NewMask()
+	if err != nil {
+		t.Fatalf("failed to create grpc mask: %v", err)
+	}
+
+	gozeroHeaders := map[string]string{
+		"X-Gozero-Target-Port":    "8081",
+		"X-Gozero-Target-Host":    "localhost",
+		"X-Gozero-Target-Scheme":  "http",
+		"X-Gozero-Target-Retries": "10",
+		"X-Gozero-Target-Backoff": "100ms",
+	}
+
+	// Add tasks
+	t.Log("********* Adding tasks *********")
+	dueDate := time.Now().Add(time.Hour * 24)
+	pastDueDate := time.Now().Add(time.Second * 5)
+	grpcclient.AddTask(client, "Buy milk", dueDate, gozeroHeaders)
+	grpcclient.AddTask(client, "Buy milk overdue", pastDueDate, gozeroHeaders)
+	time.Sleep(time.Second * 5)
+
+	// List tasks
+	t.Log("********* Listing tasks *********")
+	grpcclient.PrintTasks(client, mask, gozeroHeaders)
+
+	time.Sleep(time.Second * 1)
+	// Update tasks
+	t.Log("********* Updating tasks *********")
+	id1 := grpcclient.AddTask(client, "Buy bread", dueDate, gozeroHeaders)
+	id2 := grpcclient.AddTask(client, "Buy eggs", dueDate, gozeroHeaders)
+
+	taskToUpdate := []*pb.UpdateTaskRequest{
+		{Id: id1, Done: false, Description: "Buy 2 bread", DueDate: timestamppb.New(dueDate)},
+		{Id: id2, Done: true, Description: "Buy 3 eggs", DueDate: timestamppb.New(dueDate)},
+	}
+
+	grpcclient.UpdateTask(client, taskToUpdate, gozeroHeaders)
+	grpcclient.PrintTasks(client, mask, gozeroHeaders)
+
+	time.Sleep(time.Second * 1)
+
+	t.Log("********* Deleting tasks *********")
+	deleteTasks := []*pb.DeleteTaskRequest{
+		{Id: id1},
+		{Id: id2},
+	}
+
+	grpcclient.DeleteTask(client, gozeroHeaders, deleteTasks...)
+	grpcclient.PrintTasks(client, mask, gozeroHeaders)
+
+	time.Sleep(time.Second * 1)
+
+	t.Log("********* Test done *********")
 }
