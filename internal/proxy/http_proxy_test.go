@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 	grpcclient "github.com/araminian/grpc-simple-app/client"
 	pb "github.com/araminian/grpc-simple-app/proto/todo/v2"
 	grpcserver "github.com/araminian/grpc-simple-app/server"
-	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -22,230 +22,243 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestHTTPReverseProxy(t *testing.T) {
+type testServer struct {
+	server *http.Server
+	port   string
+}
 
+// testConfig holds common test configuration
+type testConfig struct {
+	proxyPort  int
+	targetPort string
+	headers    map[string]string
+}
+
+// setupTestConfig returns a default test configuration
+func setupTestConfig(targetPort string) testConfig {
+	return testConfig{
+		proxyPort:  8080,
+		targetPort: targetPort,
+		headers: map[string]string{
+			"X-Gozero-Target-Port":    targetPort,
+			"X-Gozero-Target-Host":    "localhost",
+			"X-Gozero-Target-Scheme":  "http",
+			"X-Gozero-Target-Retries": "10",
+			"X-Gozero-Target-Backoff": "100ms",
+		},
+	}
+}
+
+// setupProxy creates and starts a proxy server for testing
+func setupProxy(t *testing.T, cfg testConfig) (*HTTPReverseProxy, context.CancelFunc) {
+	t.Helper()
 	config.InitLogger(zapcore.ErrorLevel)
-	proxy, err := NewHTTPReverseProxy(WithListenPort(8080), WithBufferSize(1024))
+
+	proxy, err := NewHTTPReverseProxy(WithListenPort(cfg.proxyPort), WithBufferSize(1024))
 	if err != nil {
 		t.Fatalf("failed to create http proxy: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	go proxy.Start(ctx)
-	defer proxy.Shutdown(ctx)
 
-	// Start a backend server to listen on port 8081
-	backend := http.NewServeMux()
-	backend.HandleFunc("/pass", func(w http.ResponseWriter, r *http.Request) {
+	return proxy, cancel
+}
+
+// setupHTTP1Server creates and starts an HTTP/1.1 test server
+func setupHTTP1Server(t *testing.T, port string) *testServer {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/pass", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hello, World!"))
 	})
-
-	backend.HandleFunc("/fail", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/fail", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Internal Server Error"))
 	})
 
-	backendServer := &http.Server{
-		Addr:    ":8081",
-		Handler: backend,
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
 	}
 
-	go backendServer.ListenAndServe()
-	defer backendServer.Shutdown(context.Background())
-
-	// Make a request to the proxy
-	passRequest, err := http.NewRequest("GET", "http://localhost:8080/pass", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-
-	// Set Gozero headers
-	passRequest.Header.Set("X-Gozero-Target-Port", "8081")
-	passRequest.Header.Set("X-Gozero-Target-Host", "localhost")
-	passRequest.Header.Set("X-Gozero-Target-Scheme", "http")
-	passRequest.Header.Set("X-Gozero-Target-Retries", "10")
-	passRequest.Header.Set("X-Gozero-Target-Backoff", "100ms")
-
-	passResponse, err := http.DefaultClient.Do(passRequest)
-	if err != nil {
-		t.Fatalf("failed to make request: %v", err)
-	}
-
-	t.Logf("passResponse: %+v", passResponse)
-
-	body, err := io.ReadAll(passResponse.Body)
-	if err != nil {
-		t.Fatalf("failed to read response body: %v", err)
-	}
-
-	defer passResponse.Body.Close()
-
-	if string(body) != "Hello, World!" {
-		t.Fatalf("expected response body to be 'Hello, World!', got %s", string(body))
-	}
-
-	if passResponse.StatusCode != http.StatusOK {
-		t.Fatalf("expected status code to be %d, got %d", http.StatusOK, passResponse.StatusCode)
-	}
-
-	failRequest, err := http.NewRequest("GET", "http://localhost:8080/fail", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-
-	failRequest.Header.Set("X-Gozero-Target-Port", "8081")
-	failRequest.Header.Set("X-Gozero-Target-Host", "localhost")
-	failRequest.Header.Set("X-Gozero-Target-Scheme", "http")
-	failRequest.Header.Set("X-Gozero-Target-Retries", "10")
-	failRequest.Header.Set("X-Gozero-Target-Backoff", "100ms")
-
-	failResponse, err := http.DefaultClient.Do(failRequest)
-	if err != nil {
-		t.Fatalf("failed to make request: %v", err)
-	}
-
-	t.Logf("failResponse: %+v", failResponse)
-
-	defer failResponse.Body.Close()
-
-	if failResponse.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("expected status code to be %d, got %d", http.StatusInternalServerError, failResponse.StatusCode)
-	}
+	go server.ListenAndServe()
+	return &testServer{server: server, port: port}
 }
 
-func TestHTTPReverseProxyHTTP2(t *testing.T) {
-
-	config.InitLogger(zapcore.ErrorLevel)
-	proxy, err := NewHTTPReverseProxy(WithListenPort(8080), WithBufferSize(1024))
-	if err != nil {
-		t.Fatalf("failed to create http proxy: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go proxy.Start(ctx)
-	defer proxy.Shutdown(ctx)
-
-	// Create a HTTP2 server
-	backendHandler := http.NewServeMux()
-	backendHandler.HandleFunc("/pass", func(w http.ResponseWriter, r *http.Request) {
+// setupHTTP2Server creates and starts an HTTP/2 test server
+func setupHTTP2Server(t *testing.T, port string) *testServer {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/pass", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hello, World!"))
 	})
-
-	backendHandler.HandleFunc("/fail", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/fail", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Internal Server Error"))
 	})
 
 	h2s := &http2.Server{}
-	h2chandler := h2c.NewHandler(backendHandler, h2s)
+	h2chandler := h2c.NewHandler(mux, h2s)
 
-	backendServer := &http.Server{
-		Addr:    ":8081",
+	server := &http.Server{
+		Addr:    ":" + port,
 		Handler: h2chandler,
 	}
 
-	err = http2.ConfigureServer(backendServer, h2s)
-	if err != nil {
-		config.Log.Error("Error configuring HTTP/2 server", zap.Error(err))
-		panic(err)
+	if err := http2.ConfigureServer(server, h2s); err != nil {
+		t.Fatalf("failed to configure HTTP/2 server: %v", err)
 	}
 
-	go backendServer.ListenAndServe()
-	defer backendServer.Shutdown(context.Background())
+	go server.ListenAndServe()
+	return &testServer{server: server, port: port}
+}
 
-	// Create a custom HTTP/2 client
-	client := &http.Client{
+// createHTTP2Client returns an HTTP client configured for HTTP/2
+func createHTTP2Client() *http.Client {
+	return &http.Client{
 		Transport: &http2.Transport{
-			AllowHTTP: true, // Enable HTTP/2 over cleartext TCP
+			AllowHTTP: true,
 			DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
-				return net.Dial(network, addr) // Force non-TLS
+				return net.Dial(network, addr)
 			},
 		},
 	}
+}
 
-	// Make a HTTP2 request to the proxy
-	passRequest, err := http.NewRequest("GET", "http://localhost:8080/pass", nil)
+// makeRequest makes an HTTP request with the given configuration
+func makeRequest(t *testing.T, client *http.Client, method, path string, cfg testConfig) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method,
+		fmt.Sprintf("http://localhost:%d%s", cfg.proxyPort, path), nil)
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
 
-	// Set Gozero headers
-	passRequest.Header.Set("X-Gozero-Target-Port", "8081")
-	passRequest.Header.Set("X-Gozero-Target-Host", "localhost")
-	passRequest.Header.Set("X-Gozero-Target-Scheme", "http")
-	passRequest.Header.Set("X-Gozero-Target-Retries", "10")
-	passRequest.Header.Set("X-Gozero-Target-Backoff", "100ms")
+	for k, v := range cfg.headers {
+		req.Header.Set(k, v)
+	}
 
-	passResponse, err := client.Do(passRequest)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("failed to make request: %v", err)
 	}
 
-	t.Logf("passResponse: %+v", passResponse)
+	return resp
+}
 
-	defer passResponse.Body.Close()
+func TestHTTPReverseProxy(t *testing.T) {
+	cfg := setupTestConfig("8081")
+	proxy, cancel := setupProxy(t, cfg)
+	defer cancel()
+	defer proxy.Shutdown(context.Background())
 
-	if passResponse.StatusCode != http.StatusOK {
-		t.Fatalf("expected status code to be %d, got %d", http.StatusOK, passResponse.StatusCode)
+	server := setupHTTP1Server(t, cfg.targetPort)
+	defer server.server.Shutdown(context.Background())
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "successful request",
+			path:           "/pass",
+			expectedStatus: http.StatusOK,
+			expectedBody:   "Hello, World!",
+		},
+		{
+			name:           "failed request",
+			path:           "/fail",
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Internal Server Error",
+		},
 	}
 
-	body, err := io.ReadAll(passResponse.Body)
-	if err != nil {
-		t.Fatalf("failed to read response body: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := makeRequest(t, http.DefaultClient, "GET", tt.path, cfg)
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tt.expectedStatus {
+				t.Errorf("expected status code %d, got %d", tt.expectedStatus, resp.StatusCode)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read response body: %v", err)
+			}
+
+			if string(body) != tt.expectedBody {
+				t.Errorf("expected body %q, got %q", tt.expectedBody, string(body))
+			}
+		})
+	}
+}
+
+func TestHTTPReverseProxyHTTP2(t *testing.T) {
+	cfg := setupTestConfig("8081")
+	proxy, cancel := setupProxy(t, cfg)
+	defer cancel()
+	defer proxy.Shutdown(context.Background())
+
+	server := setupHTTP2Server(t, cfg.targetPort)
+	defer server.server.Shutdown(context.Background())
+
+	client := createHTTP2Client()
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "successful request",
+			path:           "/pass",
+			expectedStatus: http.StatusOK,
+			expectedBody:   "Hello, World!",
+		},
+		{
+			name:           "failed request",
+			path:           "/fail",
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Internal Server Error",
+		},
 	}
 
-	if string(body) != "Hello, World!" {
-		t.Fatalf("expected response body to be 'Hello, World!', got %s", string(body))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := makeRequest(t, client, "GET", tt.path, cfg)
+			defer resp.Body.Close()
 
-	failRequest, err := http.NewRequest("GET", "http://localhost:8080/fail", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
+			if resp.StatusCode != tt.expectedStatus {
+				t.Errorf("expected status code %d, got %d", tt.expectedStatus, resp.StatusCode)
+			}
 
-	failRequest.Header.Set("X-Gozero-Target-Port", "8081")
-	failRequest.Header.Set("X-Gozero-Target-Host", "localhost")
-	failRequest.Header.Set("X-Gozero-Target-Scheme", "http")
-	failRequest.Header.Set("X-Gozero-Target-Retries", "10")
-	failRequest.Header.Set("X-Gozero-Target-Backoff", "100ms")
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read response body: %v", err)
+			}
 
-	failResponse, err := client.Do(failRequest)
-	if err != nil {
-		t.Fatalf("failed to make request: %v", err)
-	}
-
-	t.Logf("failResponse: %+v", failResponse)
-
-	defer failResponse.Body.Close()
-
-	if failResponse.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("expected status code to be %d, got %d", http.StatusInternalServerError, failResponse.StatusCode)
+			if string(body) != tt.expectedBody {
+				t.Errorf("expected body %q, got %q", tt.expectedBody, string(body))
+			}
+		})
 	}
 }
 
 func TestHTTPReverseProxyGRPC(t *testing.T) {
-
-	// client -> proxy -> server
-	config.InitLogger(zapcore.ErrorLevel)
-	proxy, err := NewHTTPReverseProxy(WithListenPort(8080), WithBufferSize(1024))
-	if err != nil {
-		t.Fatalf("failed to create http proxy: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	cfg := setupTestConfig("8081")
+	proxy, cancel := setupProxy(t, cfg)
 	defer cancel()
+	defer proxy.Shutdown(context.Background())
 
-	go proxy.Start(ctx)
-	defer proxy.Shutdown(ctx)
-
-	// server
-	listener, err := net.Listen("tcp", "localhost:8081")
+	// Setup gRPC server
+	listener, err := net.Listen("tcp", "localhost:"+cfg.targetPort)
 	if err != nil {
 		t.Fatalf("failed to listen for grpc server: %v", err)
 	}
@@ -255,7 +268,6 @@ func TestHTTPReverseProxyGRPC(t *testing.T) {
 		t.Fatalf("failed to create grpc server: %v", err)
 	}
 
-	// Create a WaitGroup to ensure server is fully stopped
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -265,75 +277,54 @@ func TestHTTPReverseProxyGRPC(t *testing.T) {
 		}
 	}()
 
-	// Cleanup in reverse order of creation
 	defer func() {
-		server.GracefulStop() // Use GracefulStop instead of Stop
+		server.GracefulStop()
 		listener.Close()
-		wg.Wait() // Wait for server to fully stop
+		wg.Wait()
 	}()
 
-	// client
-	client, conn, err := grpcclient.NewClient("localhost:8080")
-	defer func(conn *grpc.ClientConn) {
-		if err := conn.Close(); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	}(conn)
+	// Setup gRPC client
+	client, conn, err := grpcclient.NewClient(fmt.Sprintf("localhost:%d", cfg.proxyPort))
 	if err != nil {
 		t.Fatalf("failed to create grpc client: %v", err)
 	}
+	defer conn.Close()
 
 	mask, err := grpcclient.NewMask()
 	if err != nil {
 		t.Fatalf("failed to create grpc mask: %v", err)
 	}
 
-	gozeroHeaders := map[string]string{
-		"X-Gozero-Target-Port":    "8081",
-		"X-Gozero-Target-Host":    "localhost",
-		"X-Gozero-Target-Scheme":  "http",
-		"X-Gozero-Target-Retries": "10",
-		"X-Gozero-Target-Backoff": "100ms",
-	}
+	// Test cases
+	t.Run("CRUD operations", func(t *testing.T) {
+		// Add tasks
+		dueDate := time.Now().Add(time.Hour * 24)
+		pastDueDate := time.Now().Add(time.Second * 5)
 
-	// Add tasks
-	t.Log("********* Adding tasks *********")
-	dueDate := time.Now().Add(time.Hour * 24)
-	pastDueDate := time.Now().Add(time.Second * 5)
-	grpcclient.AddTask(client, "Buy milk", dueDate, gozeroHeaders)
-	grpcclient.AddTask(client, "Buy milk overdue", pastDueDate, gozeroHeaders)
-	time.Sleep(time.Second * 5)
+		grpcclient.AddTask(client, "Buy milk", dueDate, cfg.headers)
+		grpcclient.AddTask(client, "Buy milk overdue", pastDueDate, cfg.headers)
+		time.Sleep(time.Second * 5)
 
-	// List tasks
-	t.Log("********* Listing tasks *********")
-	grpcclient.PrintTasks(client, mask, gozeroHeaders)
+		// List tasks
+		grpcclient.PrintTasks(client, mask, cfg.headers)
 
-	time.Sleep(time.Second * 1)
-	// Update tasks
-	t.Log("********* Updating tasks *********")
-	id1 := grpcclient.AddTask(client, "Buy bread", dueDate, gozeroHeaders)
-	id2 := grpcclient.AddTask(client, "Buy eggs", dueDate, gozeroHeaders)
+		// Update tasks
+		id1 := grpcclient.AddTask(client, "Buy bread", dueDate, cfg.headers)
+		id2 := grpcclient.AddTask(client, "Buy eggs", dueDate, cfg.headers)
 
-	taskToUpdate := []*pb.UpdateTaskRequest{
-		{Id: id1, Done: false, Description: "Buy 2 bread", DueDate: timestamppb.New(dueDate)},
-		{Id: id2, Done: true, Description: "Buy 3 eggs", DueDate: timestamppb.New(dueDate)},
-	}
+		updates := []*pb.UpdateTaskRequest{
+			{Id: id1, Done: false, Description: "Buy 2 bread", DueDate: timestamppb.New(dueDate)},
+			{Id: id2, Done: true, Description: "Buy 3 eggs", DueDate: timestamppb.New(dueDate)},
+		}
+		grpcclient.UpdateTask(client, updates, cfg.headers)
+		grpcclient.PrintTasks(client, mask, cfg.headers)
 
-	grpcclient.UpdateTask(client, taskToUpdate, gozeroHeaders)
-	grpcclient.PrintTasks(client, mask, gozeroHeaders)
-
-	time.Sleep(time.Second * 1)
-
-	t.Log("********* Deleting tasks *********")
-	deleteTasks := []*pb.DeleteTaskRequest{
-		{Id: id1},
-		{Id: id2},
-	}
-
-	grpcclient.DeleteTask(client, gozeroHeaders, deleteTasks...)
-	grpcclient.PrintTasks(client, mask, gozeroHeaders)
-
-	time.Sleep(time.Second * 1)
-
-	t.Log("********* Test done *********")
+		// Delete tasks
+		deletes := []*pb.DeleteTaskRequest{
+			{Id: id1},
+			{Id: id2},
+		}
+		grpcclient.DeleteTask(client, cfg.headers, deletes...)
+		grpcclient.PrintTasks(client, mask, cfg.headers)
+	})
 }
