@@ -17,6 +17,7 @@ import (
 
 	"github.com/eapache/go-resiliency/retrier"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -184,12 +185,15 @@ func (p *HTTPReverseProxy) modifyProxyResponse(r *http.Response) error {
 			config.Log.Warn("Failed to parse Location header", zap.String("Location", loc), zap.Error(err))
 		}
 	}
-	responseData, err := httputil.DumpResponse(r, true)
-	if err != nil {
-		return err
-	}
-	config.Log.Debug("Proxy response", zap.String("status", r.Status), zap.String("host", r.Request.Host), zap.String("path", r.Request.URL.Path), zap.String("method", r.Request.Method), zap.Int64("contentLength", r.ContentLength), zap.Any("requestHeaders", r.Request.Header), zap.Any("responseHeaders", r.Header), zap.String("body", string(responseData)))
 
+	// If log level is debug, log the response
+	if config.Log.Level() == zapcore.DebugLevel {
+		responseData, err := httputil.DumpResponse(r, true)
+		if err != nil {
+			return err
+		}
+		config.Log.Debug("Proxy response", zap.String("status", r.Status), zap.String("host", r.Request.Host), zap.String("path", r.Request.URL.Path), zap.String("method", r.Request.Method), zap.Int64("contentLength", r.ContentLength), zap.Any("requestHeaders", r.Request.Header), zap.Any("responseHeaders", r.Header), zap.String("body", string(responseData)))
+	}
 	r.Header.Del("Content-Security-Policy")
 	r.Header.Del("Referrer-Policy")
 	return nil
