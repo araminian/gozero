@@ -1,21 +1,12 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
-	"strings"
-	"time"
 
-	"github.com/eapache/go-resiliency/retrier"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
@@ -24,54 +15,7 @@ import (
 	"github.com/araminian/gozero/internal/config"
 )
 
-type HTTPReverseProxyConfig func(*httpReverseProxyConfig) error
-
-const (
-	defaultTimeout               = 10 * time.Minute
-	defaultPort                  = 8443
-	defaultBuffer                = 1000
-	targetHostHeader             = "X-Gozero-Target-Host"
-	targetPortHeader             = "X-Gozero-Target-Port"
-	targetSchemeHeader           = "X-Gozero-Target-Scheme"
-	targetRetriesHeader          = "X-Gozero-Target-Retries"
-	targetBackoffHeader          = "X-Gozero-Target-Backoff"
-	defaultTargetPort            = 443
-	defaultTargetScheme          = "https"
-	defaultMaxRetries            = 20
-	defaultInitialBackoff        = 100 * time.Millisecond
-	defaultIdleTimeout           = 120 * time.Second
-	defaultTLSHandshakeTimeout   = 10 * time.Second
-	defaultResponseHeaderTimeout = 30 * time.Second
-	defaultDialTimeout           = 300 * time.Second
-)
-
-type httpReverseProxyConfig struct {
-	listenPort    *int
-	requestBuffer *int
-}
-
-type HTTPReverseProxy struct {
-	listenPort int
-	httpServer *http.Server
-
-	requestBufferSize int
-	requestsCh        chan Requests
-}
-
-func WithBufferSize(buffer int) HTTPReverseProxyConfig {
-	return func(cfg *httpReverseProxyConfig) error {
-		cfg.requestBuffer = &buffer
-		return nil
-	}
-}
-
-func WithListenPort(port int) HTTPReverseProxyConfig {
-	return func(cfg *httpReverseProxyConfig) error {
-		cfg.listenPort = &port
-		return nil
-	}
-}
-
+// NewHTTPReverseProxy creates a new HTTP reverse proxy with the given configuration
 func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, error) {
 	cfg := &httpReverseProxyConfig{}
 	for _, config := range configs {
@@ -99,71 +43,13 @@ func NewHTTPReverseProxy(configs ...HTTPReverseProxyConfig) (*HTTPReverseProxy, 
 	}, nil
 }
 
-type retryRoundTripper struct {
-	next http.RoundTripper
-}
-
-func (rr *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-
-	maxRetries, err := strconv.Atoi(req.Header.Get(targetRetriesHeader))
-	if err != nil {
-		maxRetries = defaultMaxRetries
-	}
-
-	backoff, err := time.ParseDuration(req.Header.Get(targetBackoffHeader))
-	if err != nil {
-		backoff = defaultInitialBackoff
-	}
-
-	re := retrier.New(retrier.ExponentialBackoff(maxRetries, backoff), nil)
-
-	var resp *http.Response
-	var respErr error
-
-	targetHost := req.Host
-	originalHost := req.Header.Get("X-Forwarded-Host")
-
-	respErr = re.Run(func() error {
-		config.Log.Debug("Sending request", zap.String("from", originalHost), zap.String("to", targetHost))
-		resp, respErr = rr.next.RoundTrip(req)
-		if respErr != nil {
-			config.Log.Debug("Request failed, will retry", zap.Error(respErr), zap.String("from", originalHost), zap.String("to", targetHost))
-			return respErr
-		}
-		// TODO: Should i check for 404?
-
-		noHealthyUpstreamValue := "no healthy upstream"
-		noHealthyUpstreamStatusCode := http.StatusServiceUnavailable
-
-		if resp.StatusCode == noHealthyUpstreamStatusCode {
-			bodyBytes, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-			if err == nil && strings.Contains(string(bodyBytes), noHealthyUpstreamValue) {
-				msg := fmt.Sprintf("service '%s' -> '%s' is not available: status code: %d", originalHost, targetHost, resp.StatusCode)
-				config.Log.Debug("service is not available", zap.String("Status", resp.Status), zap.String("from", originalHost), zap.String("to", targetHost))
-				return errors.New(msg)
-			}
-		}
-
-		return nil
-	})
-
-	if respErr != nil {
-		msg := fmt.Sprintf("all retry attempts failed for service '%s' -> '%s': %v. Service failed to scaled up or not passing probes", originalHost, targetHost, respErr)
-		config.Log.Error("all retry attempts failed", zap.String("from", originalHost), zap.String("To", targetHost), zap.Error(respErr))
-		return resp, errors.New(msg)
-	}
-
-	return resp, nil
-}
-
+// Shutdown gracefully shuts down the proxy server
 func (p *HTTPReverseProxy) Shutdown(ctx context.Context) error {
 	close(p.requestsCh)
 	return p.httpServer.Shutdown(ctx)
 }
 
+// handleProxyError handles errors that occur during proxying
 func (p *HTTPReverseProxy) handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
 	if r.URL.Scheme == "error" {
 		http.Error(w, "Service unavailable or starting up", http.StatusServiceUnavailable)
@@ -172,6 +58,7 @@ func (p *HTTPReverseProxy) handleProxyError(w http.ResponseWriter, r *http.Reque
 	http.Error(w, err.Error(), http.StatusBadGateway)
 }
 
+// modifyProxyResponse modifies the response before sending it back to the client
 func (p *HTTPReverseProxy) modifyProxyResponse(r *http.Response) error {
 	if loc := r.Header.Get("Location"); loc != "" {
 		if u, err := url.Parse(loc); err == nil {
@@ -186,51 +73,40 @@ func (p *HTTPReverseProxy) modifyProxyResponse(r *http.Response) error {
 		}
 	}
 
-	// If log level is debug, log the response
 	if config.Log.Level() == zapcore.DebugLevel {
 		responseData, err := httputil.DumpResponse(r, true)
 		if err != nil {
 			return err
 		}
-		config.Log.Debug("Proxy response", zap.String("status", r.Status), zap.String("host", r.Request.Host), zap.String("path", r.Request.URL.Path), zap.String("method", r.Request.Method), zap.Int64("contentLength", r.ContentLength), zap.Any("requestHeaders", r.Request.Header), zap.Any("responseHeaders", r.Header), zap.String("body", string(responseData)))
+		config.Log.Debug("Proxy response",
+			zap.String("status", r.Status),
+			zap.String("host", r.Request.Host),
+			zap.String("path", r.Request.URL.Path),
+			zap.String("method", r.Request.Method),
+			zap.Int64("contentLength", r.ContentLength),
+			zap.Any("requestHeaders", r.Request.Header),
+			zap.Any("responseHeaders", r.Header),
+			zap.String("body", string(responseData)))
 	}
 	r.Header.Del("Content-Security-Policy")
 	r.Header.Del("Referrer-Policy")
 	return nil
 }
 
+// Start starts the proxy server
 func (p *HTTPReverseProxy) Start(ctx context.Context) error {
-
-	http2Transport := &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return net.Dial(network, addr)
-		},
-	}
-
-	http1Transport := &http.Transport{
-		IdleConnTimeout:       defaultIdleTimeout,
-		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
-		ResponseHeaderTimeout: defaultResponseHeaderTimeout,
-		DialContext: (&net.Dialer{
-			Timeout: defaultDialTimeout,
-		}).DialContext,
-	}
+	transport := newConditionalTransport()
 
 	proxy := &httputil.ReverseProxy{
 		Director:       p.httpDirector,
 		ErrorHandler:   p.handleProxyError,
 		ModifyResponse: p.modifyProxyResponse,
 		Transport: &retryRoundTripper{
-			next: &conditionalTransport{
-				h2Transport: http2Transport,
-				h1Transport: http1Transport,
-			},
+			next: transport,
 		},
 	}
 
 	h2s := &http2.Server{}
-
 	handler := h2c.NewHandler(proxy, h2s)
 
 	server := &http.Server{
@@ -241,15 +117,14 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	err := http2.ConfigureServer(server, h2s)
 	if err != nil {
 		config.Log.Error("Error configuring HTTP/2 server", zap.Error(err))
-		panic(err)
+		return err
 	}
 
 	p.httpServer = server
 
 	go func() {
 		config.Log.Info("Starting reverse proxy server", zap.Int("port", p.listenPort))
-		err := server.ListenAndServe()
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			config.Log.Error("Error starting reverse proxy server", zap.Error(err))
 			return
 		}
@@ -258,32 +133,19 @@ func (p *HTTPReverseProxy) Start(ctx context.Context) error {
 	<-ctx.Done()
 
 	config.Log.Info("Reverse proxy server shutting down", zap.Int("port", p.listenPort))
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		config.Log.Error("Failed to shutdown reverse proxy server", zap.Error(err))
+		return err
 	}
 
 	return nil
 }
 
-type conditionalTransport struct {
-	h2Transport *http2.Transport
-	h1Transport *http.Transport
-}
-
-func (t *conditionalTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Proto == "HTTP/2.0" {
-		config.Log.Debug("Protocol: HTTP/2.0, Using HTTP/2 transport for request", zap.String("url", req.URL.String()))
-		return t.h2Transport.RoundTrip(req)
-	}
-	config.Log.Debug("Protocol: HTTP/1.1, Using HTTP/1.1 transport for request", zap.String("url", req.URL.String()))
-	return t.h1Transport.RoundTrip(req)
-}
-
+// httpDirector modifies the request before sending it to the target server
 func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
-
 	var targetHost string
 
 	originalHost := req.Host
@@ -342,30 +204,9 @@ func (p *HTTPReverseProxy) httpDirector(req *http.Request) {
 	req.Header.Set("X-Forwarded-Proto", originalScheme)
 
 	config.Log.Debug("Proxying request", zap.String("scheme", req.URL.Scheme), zap.String("url", req.URL.String()), zap.String("to", targetHost))
-
 }
 
-func joinURLPath(a, b *url.URL) (path, rawpath string) {
-	apath := a.EscapedPath()
-	if apath == "" {
-		apath = "/"
-	}
-	bpath := b.EscapedPath()
-	if bpath == "" {
-		bpath = "/"
-	}
-	if strings.HasSuffix(apath, "/") && strings.HasPrefix(bpath, "/") {
-		apath = apath + bpath[1:]
-	} else {
-		apath = apath + bpath
-	}
-	unescaped, err := url.PathUnescape(apath)
-	if err != nil {
-		return apath, apath
-	}
-	return unescaped, apath
-}
-
+// Requests returns a channel of proxy requests
 func (p *HTTPReverseProxy) Requests() <-chan Requests {
 	return p.requestsCh
 }

@@ -9,8 +9,3 @@ type Proxier interface {
 	Shutdown(ctx context.Context) error
 	Requests() <-chan Requests
 }
-
-type Requests struct {
-	Host string
-	Path string
-}
