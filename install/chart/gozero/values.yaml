@@ -1,0 +1,66 @@
+# Default values for gozero.
+# This is a YAML-formatted file.
+
+# GoZero specific configuration
+gozero:
+  replicaCount: 1
+  fullnameOverride: gozero
+  namespace: gozero
+  istioInjection: false
+  
+  image:
+    repository: rminz/gozero
+    pullPolicy: IfNotPresent
+    tag: "0.2.5"
+
+  imagePullSecrets: []
+  nameOverride: ""
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+
+  service:
+    type: ClusterIP
+    proxyPort: 8443
+    metricsPort: 9090
+
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    requests:
+      memory: 512Mi
+      cpu: 500m
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  nodeSelector: {}
+
+  # Redis connection configuration for GoZero
+  redis:
+    port: 6379
+    host: redis.gozero.svc.cluster.local
+    logLevel: info
+
+redis:
+  enabled: true
+  image:
+    repository: bitnami/redis
+    tag: 7.4.2
+  service: 
+    type: ClusterIP
+    port: 6379
+    targetPort: 6379
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 200m
+  
