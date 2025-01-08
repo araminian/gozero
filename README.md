@@ -12,9 +12,9 @@ TODO
 
 ## Design
 
-You can find the design of `GoZero` in [docs/design.md](./docs/design.md).
+You can find the design of `GoZero` in [Design](./docs/design.md) page.
 
 ## FAQ
 
-You can find the FAQ of `GoZero` in [docs/faq.md](./docs/faq.md).
+You can find the FAQ of `GoZero` in [FAQ](./docs/faq.md) page.
 
