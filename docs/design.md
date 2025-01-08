@@ -48,3 +48,9 @@ Following diagram shows how `GoZero` works.
 3. GoZero is receiving the request and update the state of the target service in the store.
 4. GoZero is sending the request to the target service.
 5. KEDA ScaledObject is watching the metric exposed by `GoZero` and scale the target service, after expiring the TTL of the state in the store, the target service will be scaled to zero.
+
+### From zero to desired number of replicas
+
+When there is no replica of the target service, If GoZero sends request to the target service, it will be failed since there is no replica. We need to give time to KEDA to scale the target service to desired number of replicas. 
+
+Instead of sending request to the target service and tells user that the service is not available, GoZero tries to send request to the target service until the target service is ready using retry-backoff logic, which can be controlled by using `X-Gozero-Target-Retries` and `X-Gozero-Target-Backoff` headers.
