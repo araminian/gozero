@@ -52,7 +52,7 @@ spec:
 
 2. KEDA `ScaledObject` to scale the target service.
 
-```bash
+```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
