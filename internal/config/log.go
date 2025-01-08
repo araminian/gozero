@@ -32,7 +32,8 @@ func InitLogger(level zapcore.Level) {
 		zap.AddCaller(),
 		zap.Fields(
 			zap.String("version", runtime.Version()),
-			zap.String("build", Version),
+			zap.String("build", Version()),
+			zap.String("git_commit", GitCommit()),
 		),
 		zap.AddStacktrace(zapcore.ErrorLevel),
 	)

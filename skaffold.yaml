@@ -5,6 +5,9 @@ build:
     - image: rminz/gozero
       docker:
         dockerfile: Dockerfile
+        buildArgs:
+          GIT_COMMIT: "{{.GIT_COMMIT}}"
+          VERSION: "{{.VERSION}}"
       context: .
       platforms:
         - linux/arm64
