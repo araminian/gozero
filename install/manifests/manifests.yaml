@@ -54,31 +54,39 @@ spec:
     name: metrics
     targetPort: 9090
 ---
-apiVersion: networking.istio.io/v1alpha3
-kind: DestinationRule
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: gozero
+  name: redis
   namespace: gozero
 spec:
-  host: gozero.gozero.svc.cluster.local
-  trafficPolicy:
-    connectionPool:
-      http:
-        h2UpgradePolicy: UPGRADE
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 6379
 ---
-apiVersion: networking.istio.io/v1alpha3
-kind: VirtualService
+apiVersion: v1
+kind: Service
 metadata:
-  name: gozero
+  name: redis
   namespace: gozero
 spec:
-  hosts:
-  - gozero.gozero.svc.cluster.local
-  exportTo:
-  - "*"
-  http:
-  - route:
-    - destination:
-        host: gozero.gozero.svc.cluster.local
-        port:
-          number: 8443
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP

@@ -1,0 +1,24 @@
+{{- if .Values.gozero.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "gozero.fullname" . }}
+  labels:
+    {{- include "gozero.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "gozero.fullname" . }}
+  minReplicas: {{ .Values.gozero.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.gozero.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.gozero.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.gozero.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+{{- end }}

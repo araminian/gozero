@@ -2,6 +2,9 @@ set export
 set positional-arguments
 
 build VERSION:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export GIT_COMMIT=$(git rev-parse --short=7 HEAD)
   skaffold build
 
 start-redis:

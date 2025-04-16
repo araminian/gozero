@@ -1,0 +1,36 @@
+{{- if .Values.redis.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: {{ default .Release.Namespace .Values.gozero.namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: {{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}
+        resources:
+          {{- toYaml .Values.redis.resources | nindent 12 }}
+        ports:
+        - containerPort: {{ .Values.redis.service.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: gozero
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: {{ .Values.redis.service.port }}
+    targetPort: {{ .Values.redis.service.targetPort }}
+  type: ClusterIP
+{{- end }}

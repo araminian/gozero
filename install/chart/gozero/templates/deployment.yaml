@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gozero.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.gozero.namespace }}
+  labels:
+    {{- include "gozero.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.gozero.autoscaling.enabled }}
+  replicas: {{ .Values.gozero.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gozero.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "gozero.selectorLabels" . | nindent 8 }}
+        {{- if .Values.gozero.istioInjection }}
+        istio-injection: enabled
+        {{- end }}
+    spec:
+      {{- with .Values.gozero.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.gozero.securityContext | nindent 12 }}
+          image: "{{ .Values.gozero.image.repository }}:{{ .Values.gozero.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.gozero.image.pullPolicy }}
+          ports:
+            - name: http-proxy
+              containerPort: {{ .Values.gozero.service.proxyPort | default 8443 }}
+              protocol: TCP
+            - name: http-metrics
+              containerPort: {{ .Values.gozero.service.metricsPort | default 9090 }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.gozero.resources | nindent 12 }}
+          env:
+            - name: REDIS_ADDR
+              value: {{ .Values.gozero.redis.host }}
+            - name: REDIS_PORT
+              value: "{{ .Values.gozero.redis.port }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.gozero.redis.logLevel }}
+      {{- with .Values.gozero.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

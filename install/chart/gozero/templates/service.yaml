@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gozero.fullname" . }}
+  labels:
+    {{- include "gozero.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gozero.service.type }}
+  ports:
+    - port: {{ .Values.gozero.service.proxyPort }}
+      targetPort: {{ .Values.gozero.service.proxyPort }}
+      protocol: TCP
+      name: http-proxy
+    - port: {{ .Values.gozero.service.metricsPort }}
+      targetPort: {{ .Values.gozero.service.metricsPort }}
+      protocol: TCP
+      name: http-metrics
+  selector:
+    {{- include "gozero.selectorLabels" . | nindent 4 }}
